@@ -114,10 +114,6 @@ python3 create_standalone_dashboard.py
 open dashboard/dashboard_standalone.html
 ```
 
-## License & Attribution
-
-Built for UNDP Afghanistan by [Your Organization]. Uses data from UN Comtrade API. Dashboard visualizations powered by Chart.js.
-
 ## Project Structure
 
 ```
