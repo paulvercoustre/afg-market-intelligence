@@ -556,7 +556,7 @@ html_content = html_template.replace('{TRADE_DATA_PLACEHOLDER}', json.dumps(trad
 html_content = html_content.replace('{DEFINITIONS_PLACEHOLDER}', json.dumps(definitions))
 
 # Write the standalone HTML file
-with open('dashboard/dashboard_standalone.html', 'w', encoding='utf-8') as f:
+with open('docs/dashboard_standalone.html', 'w', encoding='utf-8') as f:
     f.write(html_content)
 
-print('Standalone dashboard updated: dashboard/dashboard_standalone.html')
+print('Standalone dashboard updated: docs/dashboard_standalone.html')

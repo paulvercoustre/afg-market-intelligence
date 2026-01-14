@@ -75,7 +75,7 @@ The project includes a comprehensive self-contained web dashboard for visualizin
 
 ### Using the Dashboard
 
-1. **Open Dashboard**: Double-click `dashboard/dashboard_standalone.html` in any web browser
+1. **Open Dashboard**: Double-click `docs/dashboard_standalone.html` in any web browser
 2. **Select Product**: Choose from 9 individual HS code products in the dropdown
 3. **Explore Data**: All charts and tables update automatically
 4. **Get Details**: Click ℹ️ icons for metric explanations
@@ -111,7 +111,7 @@ python3 create_standalone_dashboard.py
 ### For Dashboard Only
 ```bash
 # Just open the dashboard (works offline)
-open dashboard/dashboard_standalone.html
+open docs/dashboard_standalone.html
 ```
 
 ## Project Structure
@@ -126,8 +126,9 @@ afghanistan-trade-intelligence/
 ├── indicators.py               # Trade indicator calculations
 ├── main.py                     # Main analysis pipeline
 ├── create_standalone_dashboard.py  # Dashboard generator
-├── dashboard/
-│   ├── dashboard_standalone.html   # Self-contained interactive dashboard
+├── docs/
+│   ├── index.html                 # GitHub Pages redirect page
+│   ├── dashboard_standalone.html   # Self-contained interactive dashboard (GitHub Pages)
 │   ├── undp_logo.png              # UNDP branding assets
 │   └── info_tooltip.jpg           # Tooltip icon
 ├── indicator_definitions.json  # Metric definitions and tooltips
@@ -212,7 +213,7 @@ The project includes a comprehensive web-based dashboard for visualizing trade i
 
 #### Option 1: Standalone Dashboard (Recommended)
 1. Run `python3 create_standalone_dashboard.py` to generate a self-contained dashboard
-2. Open `dashboard/dashboard_standalone.html` in any web browser (works offline)
+2. Open `docs/dashboard_standalone.html` in any web browser (works offline)
 3. Select a product to explore its market intelligence
 
 #### Option 2: Web Server Dashboard
@@ -221,9 +222,22 @@ The project includes a comprehensive web-based dashboard for visualizing trade i
 3. Open `http://localhost:8000/dashboard_example.html` in a web browser
 4. Select a product to explore its market intelligence
 
+#### Option 3: GitHub Pages (Online)
+The dashboard is automatically available online via GitHub Pages at:
+`https://[your-username].github.io/[repository-name]/`
+
+To set up GitHub Pages:
+1. Go to your repository settings
+2. Scroll to "Pages" section
+3. Select "Deploy from a branch"
+4. Choose "main" branch and "/docs" folder
+5. Save and wait for deployment (usually 1-2 minutes)
+
+The dashboard will be accessible at the repository's root URL, with an automatic redirect to the full dashboard.
+
 ### Dashboard Files
 
-- `dashboard/dashboard_standalone.html`: Self-contained dashboard (recommended for offline use)
+- `docs/dashboard_standalone.html`: Self-contained dashboard (recommended for offline use)
 - `dashboard_example.html`: Web server version (requires local server)
 - `create_standalone_dashboard.py`: Script to generate the standalone version
 - `indicator_definitions.json`: Metric definitions and descriptions
