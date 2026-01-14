@@ -1,0 +1,57 @@
+# Virtual environments
+mrkt_intel_venv/
+venv/
+env/
+ENV/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+analysis.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Jupyter notebooks (if any)
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
+
+# Data files (for privacy/security)
+raw_*.csv
+output/raw_*.csv
+
+# API keys and secrets
+secrets.json
+config/secrets.json
+
+# Build files
+dist/
+build/
+
+# Test files
+test_*.py
+test_*.html
+debug_*.py
+*_debug.html
+*_test.html

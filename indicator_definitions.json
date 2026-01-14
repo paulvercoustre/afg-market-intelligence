@@ -1,0 +1,144 @@
+{
+  "metadata": {
+    "description": "Definitions for all indicators computed by the Afghanistan Trade Intelligence Tool",
+    "version": "1.0",
+    "last_updated": "2026-01-14",
+    "purpose": "Provides clear explanations for dashboard users to understand trade intelligence metrics"
+  },
+  "indicators": {
+    "export_value": {
+      "name": "Afghanistan Export Value (2024)",
+      "description": "Total value of Afghanistan's exports to this specific market in USD for the latest year (2024)",
+      "calculation": "Sum of trade values for all HS codes in the latest year (2024)",
+      "unit": "USD",
+      "data_type": "currency",
+      "importance": "Shows the current size of Afghanistan's trade relationship with each market"
+    },
+    "global_market_size": {
+      "name": "Global Market Size (2024)",
+      "description": "Total value of all countries' imports of this product globally in the latest year (2024)",
+      "calculation": "Sum of import values for the product across all importing countries in 2024",
+      "unit": "USD",
+      "data_type": "currency",
+      "importance": "Represents the current global demand for this product"
+    },
+    "market_rank": {
+      "name": "Market Rank",
+      "description": "Afghanistan's ranking among all suppliers to this market by export value",
+      "calculation": "Ranking based on export value compared to all other countries exporting to this market",
+      "unit": "Position (1 = highest)",
+      "data_type": "ordinal",
+      "importance": "Shows Afghanistan's competitive position in each market"
+    },
+    "market_share_pct": {
+      "name": "Market Share Percentage (2024)",
+      "description": "Afghanistan's share of the total imports in this market for the latest year (2024)",
+      "calculation": "(Afghanistan's exports to market in 2024 / Total market imports in 2024) × 100",
+      "unit": "Percentage",
+      "data_type": "percentage",
+      "range": "0-100%",
+      "importance": "Indicates Afghanistan's current penetration in each market"
+    },
+    "afghanistan_rank": {
+      "name": "Afghanistan's Global Rank",
+      "description": "Afghanistan's ranking among all importing countries globally for this product",
+      "calculation": "Ranking based on total import value across all products",
+      "unit": "Position (1 = largest importer)",
+      "data_type": "ordinal",
+      "importance": "Shows how important this market is globally for this product"
+    },
+    "yoy_growth_pct": {
+      "name": "Year-over-Year Growth",
+      "description": "Average annual percentage change in Afghanistan's exports to this market",
+      "calculation": "((Current Year - Previous Year) / Previous Year) × 100, averaged across years",
+      "unit": "Percentage",
+      "data_type": "percentage",
+      "importance": "Indicates growth trend in Afghanistan's market position"
+    },
+    "cagr_pct": {
+      "name": "Compound Annual Growth Rate",
+      "description": "The geometric progression ratio that provides a constant rate of return over the time period",
+      "calculation": "((Ending Value / Beginning Value)^(1/number of periods)) - 1) × 100",
+      "unit": "Percentage",
+      "data_type": "percentage",
+      "importance": "Shows the smoothed annual growth rate over the entire period"
+    },
+    "growth_percentage": {
+      "name": "Absolute Growth Percentage",
+      "description": "Total percentage increase from first to last year of analysis",
+      "calculation": "((Last Year Value - First Year Value) / First Year Value) × 100",
+      "unit": "Percentage",
+      "data_type": "percentage",
+      "importance": "Shows the total change over the analysis period"
+    },
+    "unit_price": {
+      "name": "Unit Price (2024)",
+      "description": "Average price per unit of Afghanistan's exports in the latest year (2024)",
+      "calculation": "Total export value in 2024 / Total export quantity in 2024",
+      "unit": "USD per unit",
+      "data_type": "currency",
+      "importance": "Indicates the current price level of Afghanistan's products"
+    },
+    "market_avg_price": {
+      "name": "Market Average Price",
+      "description": "Average price per unit across all suppliers to this market",
+      "calculation": "Total market import value / Total market import quantity",
+      "unit": "USD per unit",
+      "data_type": "currency",
+      "importance": "Represents the typical price level in this market"
+    },
+    "price_vs_market_pct": {
+      "name": "Price vs Market Percentage",
+      "description": "How Afghanistan's price compares to the market average",
+      "calculation": "((Afghanistan Price - Market Average) / Market Average) × 100",
+      "unit": "Percentage",
+      "data_type": "percentage",
+      "importance": "Shows pricing competitiveness relative to market standards"
+    },
+    "price_competitiveness": {
+      "name": "Price Competitiveness",
+      "description": "Categorical assessment of Afghanistan's pricing strategy",
+      "calculation": "Based on price_vs_market_pct thresholds",
+      "categories": {
+        "Highly Competitive": "Price > 20% below market average",
+        "Competitive": "Price 10-20% below market average",
+        "Average": "Price within ±10% of market average",
+        "Above Market": "Price 10-20% above market average",
+        "Premium": "Price > 20% above market average"
+      },
+      "data_type": "categorical",
+      "importance": "Provides actionable insight into pricing strategy"
+    },
+    "avg_competitor_price": {
+      "name": "Average Competitor Price",
+      "description": "Average price of Afghanistan's main competitors in this market",
+      "calculation": "Mean price of top 5 competitors by market share",
+      "unit": "USD per unit",
+      "data_type": "currency",
+      "importance": "Shows competitor pricing levels for comparison"
+    },
+    "price_rank": {
+      "name": "Price Rank",
+      "description": "Afghanistan's price ranking among all suppliers to this market",
+      "calculation": "Ranking by unit price (1 = lowest price)",
+      "unit": "Position (1 = cheapest)",
+      "data_type": "ordinal",
+      "importance": "Shows pricing position relative to competitors"
+    }
+  },
+  "data_quality_notes": {
+    "mirror_data": "Afghanistan export data is derived from mirror statistics (partner countries' import records) since Afghanistan does not report direct export data",
+    "hs_codes": "Analysis covers multiple HS codes per product for comprehensive coverage",
+    "currency": "All values in current USD",
+    "time_period": "Analysis covers 4-year period (2021-2024) for trend analysis",
+    "market_coverage": "Top 10 global import markets analyzed per product"
+  },
+  "methodology": {
+    "data_source": "UN Comtrade API via mirror statistics",
+    "time_period_analysis": "Most indicators based on latest year (2024) for current market assessment. Growth rates calculated across all years for trend analysis.",
+    "aggregation": "Data aggregated by market and year for multi-dimensional analysis",
+    "ranking": "Global rankings based on most recent year (2024) data",
+    "growth_calculation": "Compound growth rates calculated using geometric mean across all available years",
+    "price_analysis": "Unit prices calculated as value/quantity ratios for latest year data"
+  }
+}
