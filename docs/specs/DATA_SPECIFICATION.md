@@ -1,0 +1,545 @@
+# Market Intelligence Tool — Data Specification
+
+| Field | Value |
+|---|---|
+| **Version** | 0.1 (draft) |
+| **Status** | Draft — for internal review and ACCI co-design |
+| **Date** | 2026-07-01 |
+| **Authors** | ICPSD Crisis Resilience team |
+| **Parent document** | [SCOPING_NOTE.md](../../SCOPING_NOTE.md) |
+| **Related documents** | [FUNCTIONAL_SPECIFICATION.md](./FUNCTIONAL_SPECIFICATION.md) |
+
+---
+
+## 1. Purpose
+
+This Data Specification defines **where data comes from**, **how it is transformed**, **how it is stored**, and **what quality standards apply** for the Market Intelligence Tool. It is the technical companion to the Functional Specification and the basis for ETL development, data licensing review, and ACCI handover planning.
+
+---
+
+## 2. Data architecture overview
+
+```mermaid
+flowchart TB
+    subgraph sources [External sources]
+        Comtrade[UN Comtrade API]
+        WB[World Bank API]
+        WITS[WITS Tariff API]
+        Static[Static lookups in config.py]
+        FutureB[Tier B sources - Phase 1 gaps]
+        FutureC[Tier C sources - Phase 2-3]
+    end
+    subgraph etl [ETL pipeline - etl/]
+        Fetch[fetch.py]
+        Transform[transform.py]
+        Load[load.py]
+        Run[run.py orchestrator]
+    end
+    subgraph storage [PostgreSQL]
+        Products[products]
+        Markets[markets]
+        TradeFlows[trade_flows]
+        CompFlows[competitor_flows]
+        MktContext[market_context]
+        Indicators[indicators]
+        PipelineRuns[pipeline_runs]
+    end
+    subgraph api [FastAPI backend]
+        Discovery[/api/discover]
+        ProductsAPI[/api/products]
+    end
+    Comtrade --> Fetch
+    WB --> Fetch
+    WITS --> Fetch
+    Static --> Transform
+    Fetch --> Transform --> Load --> storage
+    storage --> api
+    FutureB -.-> Fetch
+    FutureC -.-> Fetch
+```
+
+**Pattern:** Batch ETL (fetch → transform → load) with pre-computed indicators and scores. The API serves read-only queries against PostgreSQL; no live API calls at request time.
+
+---
+
+## 3. Source inventory
+
+Sources from the scoping note are classified into three tiers based on current integration status and pilot needs.
+
+### 3.1 Tier A — In use (integrated in ETL)
+
+#### UN Comtrade
+
+| Attribute | Value |
+|---|---|
+| **Provider** | United Nations Statistics Division |
+| **API** | Yes — `comtradeapicall` Python package |
+| **Access** | Subscription key (`COMTRADE_API_KEY` env var) |
+| **Rate limits** | ~1 request/second (enforced by `_API_DELAY = 1.0` in `etl/fetch.py`); exponential backoff on rate-limit errors |
+| **Licensing** | UN Comtrade terms of use; redistribution of processed aggregates generally permitted with attribution |
+| **Cost** | Free tier available; premium subscription may be needed at scale |
+| **Refresh cadence** | Monthly (ETL cron: 1st of month, 02:00 UTC) |
+| **Fallback** | None for core trade data; pipeline logs warning and skips product on empty response |
+
+**Data used:**
+
+| Comtrade query | Purpose | Key fields |
+|---|---|---|
+| Mirror exports (`flow=M`, `partner=AFG`) | Afghanistan's exports to each market (importer reports imports from AFG) | `reporterCode`, `refYear`, `primaryValue`, `qty`, `netWgt` |
+| Global imports (`flow=M`, all reporters × all partners) | Market size, competitor supplier breakdown | `reporterCode`, `partnerCode`, `refYear`, `primaryValue`, `qty` |
+
+**Granularity:** 6-digit HS code, annual, bilateral (reporter × partner).
+
+**Years covered:** 2021–2024 (configurable in `config.py` → `YEARS`).
+
+---
+
+#### World Bank — Development Indicators (WDI + WGI)
+
+| Attribute | Value |
+|---|---|
+| **Provider** | World Bank |
+| **API** | Yes — REST `https://api.worldbank.org/v2` |
+| **Access** | No key required |
+| **Rate limits** | Gentle throttling (`time.sleep(0.2)` between countries) |
+| **Licensing** | Open data; attribution required |
+| **Cost** | Free |
+| **Refresh cadence** | Monthly (with ETL) |
+| **Fallback** | Missing indicators → `NULL` in `market_context`; market quality score defaults to 50 (neutral) |
+
+**Indicators fetched:**
+
+| Internal field | WB indicator code | Description |
+|---|---|---|
+| `gdp_usd` | `NY.GDP.MKTP.CD` | GDP (current USD) |
+| `gdp_per_capita_usd` | `NY.GDP.PCAP.CD` | GDP per capita (current USD) |
+| `lpi_score` | `LP.LPI.OVRL.XQ` | Logistics Performance Index (overall) |
+| `regulatory_quality` | `RQ.EST` | WGI: Regulatory Quality (estimate) |
+| `political_stability` | `PV.EST` | WGI: Political Stability (estimate) |
+
+**Granularity:** Country (ISO-3), annual.
+
+**Storage:** `market_context` table, keyed by ISO-3 `country_code`.
+
+---
+
+#### WITS (World Integrated Trade Solution)
+
+| Attribute | Value |
+|---|---|
+| **Provider** | World Bank |
+| **API** | Yes — SDMX/JSON `http://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN` |
+| **Access** | No key required |
+| **Rate limits** | Bulk fetch preferred (`reporter=ALL`); per-country fallback with 0.3s delay |
+| **Licensing** | World Bank open data terms |
+| **Cost** | Free |
+| **Refresh cadence** | Monthly (with ETL) |
+| **Fallback** | No tariff data → neutral tariff score (50); `tariff_rate_pct = NULL` |
+
+**Indicators used:**
+
+| WITS indicator | Description | Priority |
+|---|---|---|
+| `AHS-SMPL-AVG` | Effectively applied tariff, simple average (preferential, partner=AFG) | First |
+| `MFN-SMPL-AVG` | MFN tariff, simple average (partner=000) | Fallback |
+
+**Strategy:** For each year (descending), fetch AHS rates for all reporters in one bulk call. If AHS unavailable for a market, use MFN. WITS data typically lags 2–3 years behind Comtrade.
+
+**Granularity:** 6-digit HS code, country (ISO-3), annual.
+
+**Storage:** Denormalised into `indicators.tariff_rate_pct` and `indicators.tariff_indicator`.
+
+---
+
+#### Static lookups (`config.py`)
+
+| Lookup | Keyed by | Purpose | Provenance |
+|---|---|---|---|
+| `DISTANCE_FROM_KABUL_KM` | Comtrade numeric country code | Proximity scoring | Approximate straight-line km; manual compilation |
+| `LANGUAGE_SIMILARITY` | Comtrade numeric country code | Language/cultural scoring (0.0–1.0) | Expert judgment based on Dari/Pashto mutual intelligibility |
+| `FTA_STATUS` | Comtrade numeric country code | Preferential access flag | Afghanistan memberships: SAPTA, ECO, EU/UK GSP+ |
+| `PRODUCTS` | Product name | 34 pilot products with HS codes | UNDP/ACCI product selection |
+| `OPPORTUNITY_SCORE_WEIGHTS` | Dimension name | Scoring model weights | Scoping note methodology |
+
+**Limitations:** Static lookups do not auto-update when trade agreements change. Manual review required when FTA status changes.
+
+---
+
+### 3.2 Tier B — Needed for Phase 1 features (not yet integrated)
+
+| Source | Features blocked | API | Licensing risk | Priority |
+|---|---|---|---|---|
+| **ITC Trade Map** | Top Importers Directory, buyer contacts | Limited (specific circumstances) | **High** — company data redistribution restricted | Critical |
+| **Trade Atlas** | Company-level buyer/supplier search | Yes | **High** — commercial licence | High |
+| **Kompass** | B2B buyer directory | Yes | **High** — commercial licence | Medium |
+| **Market Access Map (ITC)** | Full tariff breakdown (VAT, fees, NTMs) | No (web only) | Medium — may require ITC partnership | High |
+| **EU Access2Markets** | EU regulatory requirements, SPS, labelling | No (web only) | Low — public EU data | High |
+| **WTO Tariff & Trade Data (IDB/CTS)** | Bound vs. applied tariffs, import data | Yes | Low — WTO open data | Medium |
+| **ACCI Afghanistan** | Afghanistan-specific trade data by industry | No | Unknown — **must confirm with ACCI** | High |
+| **NSIA Afghanistan** | Official Afghan trade balance, commodity exports | No | Unknown — government data sharing agreement needed | Medium |
+
+**Action required before build:** Confirm data availability, licensing terms, and redistribution rights for each Tier B source. See §8 Open Questions.
+
+---
+
+### 3.3 Tier C — Phase 2–3 sources (not yet integrated)
+
+| Source | Planned feature | API | Notes |
+|---|---|---|---|
+| **ITC Export Potential Map** | Market opportunity validation, trade fair recommendations | Limited | Pre-calculated indicators; complements Comtrade |
+| **FAO FAOSTAT** | Agricultural commodity prices | Yes | Food/agriculture products only |
+| **OEC (Observatory of Economic Complexity)** | Trend forecasts, export potential | Yes | Visualization and trend data |
+| **World Bank LPI 2.0** | Route & logistics scoring | No | Latest 2023–2024 dataset; supply-chain tracking |
+| **UN ESCAP APTIAD** | Trade agreement details (Asia-Pacific) | No | Agreement-country matrix |
+| **WTO SPS/TBT notifications** | Regulatory change alerts | Yes | Sanitary/phytosanitary and technical barriers |
+
+---
+
+## 4. Methodology notes
+
+### 4.1 Mirror statistics for Afghanistan
+
+Afghanistan does **not** report trade data directly to UN Comtrade. The ETL uses **mirror statistics**: for each HS code, it queries all countries' **import** records where Afghanistan (`partnerCode = 4`) is listed as the exporting partner.
+
+```
+Importer (reporter) reports: "I imported $X of HS 091020 from Afghanistan"
+→ This becomes Afghanistan's export to that importer.
+```
+
+This is the standard UN-recommended approach for non-reporting countries. Mirror data may undercount Afghanistan's true exports when:
+
+- Trading partners do not report bilateral detail
+- Transit trade is attributed to the transit country, not Afghanistan
+- Informal border trade is not captured
+
+**Implication:** Afghan export values should be treated as a **lower bound**, not a complete picture.
+
+### 4.2 Market size calculation
+
+Global market size for a product in a destination market = total imports of that HS code by the market (Comtrade `partnerCode = 0`, i.e. world total as partner).
+
+### 4.3 Competitor identification
+
+For each (product, market) pair, all supplying countries (excluding world total `partnerCode = 0`) are ranked by import value. Top 15 suppliers are stored in `competitor_flows`. Afghanistan's rank among suppliers is stored as `afg_supplier_rank`.
+
+### 4.4 Growth metrics
+
+| Metric | Formula | Notes |
+|---|---|---|
+| YoY growth | `(value_t − value_{t−1}) / value_{t−1} × 100` | Requires ≥2 years of data |
+| CAGR | `(value_last / value_first)^(1/n) − 1) × 100` | `n` = years between first and last |
+| Absolute growth | `value_last − value_first` | USD |
+| Growth % | `absolute / value_first × 100` | USD |
+
+### 4.5 Price competitiveness
+
+Afghan unit price = `trade_value_usd / trade_quantity` (or `/ net_weight_kg` as fallback).
+
+Market average price = mean unit price across all suppliers to the market.
+
+| Label | Condition (% vs. market average) |
+|---|---|
+| Highly Competitive | < −10% |
+| Competitive | −10% to 0% |
+| Average | 0% to +10% |
+| Above Market | > +10% |
+
+Thresholds defined in `config.py` → `PRICE_COMPETITIVENESS`.
+
+### 4.6 Opportunity score computation
+
+Each of nine dimensions is normalised to 0–100, then combined as a weighted sum:
+
+| Dimension | Weight | Normalisation method |
+|---|---|---|
+| Market size | 20% | `log1p(size) / log1p(max_size) × 100` across all markets for the product |
+| Market growth | 18% | CAGR mapped to 0–100 (negative CAGR → 0, ≥20% → 100) |
+| Market quality | 13% | Composite of LPI + regulatory quality + political stability |
+| Price competitiveness | 13% | Label-based: Highly Competitive=100, Competitive=75, Average=50, Above Market=25 |
+| Tariff | 10% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
+| Afghan foothold | 10% | Log-scaled existing export value |
+| Distance | 10% | Inverse distance from Kabul (closer = higher) |
+| Language | 4% | `similarity × 100` (0.0–1.0 lookup) |
+| FTA access | 2% | 100 if FTA exists, 0 otherwise |
+
+Weights must sum to 1.0 (enforced in `config.py`).
+
+**Missing data handling:** If a dimension cannot be computed (e.g. no WITS tariff), its sub-score defaults to 50 (neutral) and the composite score is still calculated. This avoids excluding markets with data gaps while not over-penalising them. Implemented in `etl/transform.py` (`_score_tariff`, `_score_market_quality`, `_score_distance`, `_score_growth`, `_score_price`).
+
+### 4.7 Country code conventions
+
+The system uses **two country code systems** that must be kept consistent:
+
+| Context | Code system | Example (India) |
+|---|---|---|
+| Comtrade trade flows, indicators, competitor flows | UN M49 numeric (string) | `"699"` or `"356"` |
+| World Bank, WITS tariffs, `market_context` | ISO 3166-1 alpha-3 | `"IND"` |
+| `markets.country_code` | UN M49 numeric (string) | `"699"` |
+
+**Known issue:** Comtrade sometimes returns placeholder country names (`"None"`, raw numeric codes). The ETL and API layer use `backend/country_names.py` → `resolve_country_name()` to display human-readable names at ingestion and read time.
+
+**Rule for new development:** Store Comtrade M49 numeric codes in trade-related tables; store ISO-3 in World Bank / WITS tables; maintain a mapping table or lookup function between the two.
+
+---
+
+## 5. Data dictionary
+
+### 5.1 `products`
+
+Pilot product catalogue. Seeded from `config.py` → `PRODUCTS` on ETL run.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | INTEGER | PK | Auto-increment |
+| `name` | TEXT | NOT NULL, UNIQUE | Display name (e.g. "Saffron") |
+| `category` | TEXT | NOT NULL | Product category (e.g. "Spices & Herbs") |
+| `hs_codes` | TEXT[] | NOT NULL | One or more 6-digit HS codes (no dots) |
+| `description` | TEXT | Yes | Short product description |
+
+**Source:** `config.py` (static, version-controlled).
+
+---
+
+### 5.2 `markets`
+
+Reference table of trading partner countries.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | INTEGER | PK | Auto-increment |
+| `country_code` | TEXT | NOT NULL, UNIQUE | UN M49 numeric code (string) |
+| `country_name` | TEXT | Yes | Display name |
+| `region` | TEXT | Yes | Geographic region (not yet populated) |
+
+**Source:** Derived from Comtrade reporter codes encountered during ETL.
+
+---
+
+### 5.3 `market_context`
+
+World Bank development indicators per country per year.
+
+| Column | Type | Nullable | Description | Source |
+|---|---|---|---|---|
+| `id` | INTEGER | PK | Auto-increment | — |
+| `country_code` | TEXT | NOT NULL | ISO-3 alpha code | World Bank |
+| `year` | INTEGER | NOT NULL | Data year | World Bank |
+| `gdp_usd` | NUMERIC(20,2) | Yes | GDP, current USD | `NY.GDP.MKTP.CD` |
+| `gdp_per_capita_usd` | NUMERIC(20,2) | Yes | GDP per capita, current USD | `NY.GDP.PCAP.CD` |
+| `lpi_score` | NUMERIC(5,3) | Yes | Logistics Performance Index | `LP.LPI.OVRL.XQ` |
+| `regulatory_quality` | NUMERIC(6,4) | Yes | WGI regulatory quality estimate | `RQ.EST` |
+| `political_stability` | NUMERIC(6,4) | Yes | WGI political stability estimate | `PV.EST` |
+| `fetched_at` | TIMESTAMPTZ | NOT NULL | ETL fetch timestamp | System |
+
+**Unique key:** (`country_code`, `year`).
+
+---
+
+### 5.4 `trade_flows`
+
+Afghanistan's mirror export flows: one row per (product, importer, year).
+
+| Column | Type | Nullable | Description | Source |
+|---|---|---|---|---|
+| `id` | INTEGER | PK | Auto-increment | — |
+| `product_id` | INTEGER | FK → products | Product reference | — |
+| `importer_code` | TEXT | NOT NULL | Importing country (M49 numeric) | Comtrade `reporterCode` |
+| `importer_name` | TEXT | Yes | Importing country name | Comtrade `reporterDesc` |
+| `year` | INTEGER | NOT NULL | Trade year | Comtrade `refYear` |
+| `trade_value_usd` | NUMERIC(20,2) | Yes | Trade value, USD | Comtrade `primaryValue` |
+| `trade_quantity` | NUMERIC(20,4) | Yes | Quantity traded | Comtrade `qty` |
+| `quantity_unit` | TEXT | Yes | Unit of quantity | Comtrade `qtyUnitAbbr` |
+| `net_weight_kg` | NUMERIC(20,4) | Yes | Net weight, kg | Comtrade `netWgt` |
+| `fetched_at` | TIMESTAMPTZ | NOT NULL | ETL fetch timestamp | System |
+
+**Unique key:** (`product_id`, `importer_code`, `year`).
+
+---
+
+### 5.5 `competitor_flows`
+
+Supplier countries exporting a product to a given market.
+
+| Column | Type | Nullable | Description | Source |
+|---|---|---|---|---|
+| `id` | INTEGER | PK | Auto-increment | — |
+| `product_id` | INTEGER | FK → products | Product reference | — |
+| `market_code` | TEXT | NOT NULL | Importing market (M49 numeric) | Comtrade `reporterCode` |
+| `year` | INTEGER | NOT NULL | Trade year | Comtrade `refYear` |
+| `supplier_code` | TEXT | NOT NULL | Exporting country (M49 numeric) | Comtrade `partnerCode` |
+| `supplier_name` | TEXT | NOT NULL | Exporting country name | Comtrade `partnerDesc` |
+| `trade_value_usd` | NUMERIC(20,2) | Yes | Import value from this supplier, USD | Comtrade `primaryValue` |
+| `trade_quantity` | NUMERIC(20,4) | Yes | Quantity | Comtrade `qty` |
+
+**Unique key:** (`product_id`, `market_code`, `supplier_code`, `year`).
+
+---
+
+### 5.6 `indicators`
+
+Pre-computed trade indicators and opportunity scores. One row per (product, market, year). This is the primary table served by the discovery API.
+
+| Column | Type | Description | Source |
+|---|---|---|---|
+| `id` | INTEGER PK | Auto-increment | — |
+| `product_id` | INTEGER FK | Product reference | — |
+| `market_code` | TEXT | Market country code (M49 numeric) | Comtrade |
+| `computed_for_year` | INTEGER | Year the indicators are computed for | ETL (latest in `YEARS`) |
+| **Trade indicators** | | | |
+| `global_market_size_usd` | NUMERIC(20,2) | Total market imports of product, USD | Comtrade (world total) |
+| `afg_export_value_usd` | NUMERIC(20,2) | Afghanistan exports to market, USD | Comtrade (mirror) |
+| `yoy_growth_pct` | NUMERIC(10,4) | Year-on-year export growth % | Computed |
+| `cagr_pct` | NUMERIC(10,4) | Compound annual growth rate % | Computed |
+| `absolute_growth_usd` | NUMERIC(20,2) | Absolute export growth, USD | Computed |
+| `growth_pct` | NUMERIC(10,4) | Total growth % over period | Computed |
+| `first_year` | INTEGER | First year in growth calculation | Computed |
+| `last_year` | INTEGER | Last year in growth calculation | Computed |
+| `market_share_pct` | NUMERIC(10,6) | Afghanistan's share of market imports % | Computed |
+| `afg_supplier_rank` | INTEGER | Afghanistan's rank among suppliers | Computed |
+| `unit_price_usd` | NUMERIC(20,6) | Afghan unit price, USD | Computed |
+| `market_avg_price_usd` | NUMERIC(20,6) | Market average unit price, USD | Computed |
+| `price_vs_market_pct` | NUMERIC(10,4) | Afghan price vs. market average % | Computed |
+| `price_competitiveness` | TEXT | Competitiveness label | Computed |
+| **Opportunity score** | | | |
+| `opportunity_score` | NUMERIC(5,2) | Composite score 0–100 | Computed |
+| **Static context** | | | |
+| `distance_km` | INTEGER | Distance from Kabul, km | `config.py` |
+| `has_fta` | BOOLEAN | Preferential trade access exists | `config.py` |
+| `language_similarity` | NUMERIC(4,3) | Language similarity 0.0–1.0 | `config.py` |
+| **World Bank context (denormalised)** | | | |
+| `gdp_per_capita_usd` | NUMERIC(20,2) | GDP per capita | World Bank |
+| `lpi_score` | NUMERIC(5,3) | Logistics Performance Index | World Bank |
+| `regulatory_quality` | NUMERIC(6,4) | Regulatory quality estimate | World Bank |
+| `political_stability` | NUMERIC(6,4) | Political stability estimate | World Bank |
+| **WITS tariff** | | | |
+| `tariff_rate_pct` | NUMERIC(6,3) | Import tariff rate % | WITS |
+| `tariff_indicator` | TEXT | `'AHS'` (preferential) or `'MFN'` (general) | WITS |
+| **Sub-scores (0–100 each)** | | | |
+| `score_market_size` | NUMERIC(5,2) | Market size dimension score | Computed |
+| `score_market_growth` | NUMERIC(5,2) | Market growth dimension score | Computed |
+| `score_market_quality` | NUMERIC(5,2) | Market quality dimension score | Computed |
+| `score_price_competitiveness` | NUMERIC(5,2) | Price competitiveness dimension score | Computed |
+| `score_afg_foothold` | NUMERIC(5,2) | Afghan foothold dimension score | Computed |
+| `score_distance` | NUMERIC(5,2) | Proximity dimension score | Computed |
+| `score_language` | NUMERIC(5,2) | Language dimension score | Computed |
+| `score_fta` | NUMERIC(5,2) | FTA access dimension score | Computed |
+| `score_tariff` | NUMERIC(5,2) | Tariff dimension score | Computed |
+| `computed_at` | TIMESTAMPTZ | Timestamp of computation | System |
+
+**Unique key:** (`product_id`, `market_code`, `computed_for_year`).
+
+**Note:** World Bank fields are denormalised from `market_context` for query efficiency. Tariff and static context are similarly denormalised.
+
+---
+
+### 5.7 `pipeline_runs`
+
+ETL execution audit log.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `run_at` | TIMESTAMPTZ | Run start timestamp |
+| `status` | TEXT | `'success'`, `'partial'`, or `'failed'` |
+| `products_updated` | INTEGER | Count of products successfully processed |
+| `errors_json` | JSONB | Error details per product (if any) |
+
+---
+
+## 6. Refresh and retention
+
+| Parameter | Value |
+|---|---|
+| **ETL schedule** | Monthly — 1st of month, 02:00 UTC (GitHub Actions `etl.yml`) |
+| **Manual trigger** | `docker-compose exec backend python -m etl.run` |
+| **Years retained** | 2021–2024 (configurable via `config.YEARS`) |
+| **Upsert strategy** | Idempotent — `load.py` upserts on unique keys; re-running ETL replaces existing rows |
+| **Partial runs** | Supported: `--products "Saffron" "Dried Grapes (Raisins)"` |
+| **Skip flags** | `--skip-world-bank`, `--skip-tariffs`, `--dry-run` |
+| **Retention policy** | All years in `YEARS` are kept; older years are not automatically purged |
+| **Audit trail** | Every ETL run logged in `pipeline_runs` with status and error details |
+
+### ETL orchestration flow
+
+```
+etl.run
+  ├── Phase A: fetch_world_bank_indicators(country_codes, years)  [unless --skip-world-bank]
+  │     └── build market_context lookup (used by all products)
+  ├── Phase B: For each product in config.PRODUCTS (or --products filter):
+  │     ├── fetch_mirror_exports(hs_code, years)
+  │     ├── fetch_global_imports(hs_code, years)
+  │     ├── transform → trade_flows, competitor_flows, indicators
+  │     ├── fetch_tariff_rates(market_codes, hs_codes, years)  [unless --skip-tariffs; per product]
+  │     ├── enrich_indicators_with_scores(static lookups, WB context, WITS tariffs)
+  │     └── load → upsert to PostgreSQL
+  └── log pipeline_run(status, products_updated, errors)
+```
+
+---
+
+## 7. Data quality rules
+
+The ETL and API layers should enforce or validate the following rules. Rules marked **Enforced** are implemented today; **Planned** are recommended additions.
+
+| # | Rule | Severity | Status |
+|---|---|---|---|
+| DQ-1 | `OPPORTUNITY_SCORE_WEIGHTS` values must sum to 1.0 ± 0.001 | Error | **Enforced** (config) |
+| DQ-2 | `opportunity_score` must be in [0, 100] when not NULL | Error | **Enforced** (transform) |
+| DQ-3 | All `score_*` sub-scores must be in [0, 100] | Error | **Enforced** (transform) |
+| DQ-4 | `trade_value_usd` must be ≥ 0 when not NULL | Error | **Planned** |
+| DQ-5 | `tariff_rate_pct` must be in [0, 100] when not NULL | Warning | **Planned** |
+| DQ-6 | `market_code` / `importer_code` / `supplier_code` must resolve to a known country via `resolve_country_name()` | Warning | **Partial** (display layer only) |
+| DQ-7 | `computed_for_year` must be in `config.YEARS` | Error | **Enforced** (ETL) |
+| DQ-8 | Each product must have ≥ 1 market with a non-NULL `opportunity_score` after ETL | Warning | **Planned** (post-ETL check) |
+| DQ-9 | `pipeline_runs.status` must be `'failed'` if any product errors occurred | Error | **Enforced** (ETL) |
+| DQ-10 | Duplicate rows on unique keys must be upserted, not inserted | Error | **Enforced** (load.py) |
+| DQ-11 | WITS tariff indicator must be `'AHS'` or `'MFN'` when `tariff_rate_pct` is not NULL | Warning | **Planned** |
+| DQ-12 | Mirror export value for a market should not exceed global market size for that market | Warning | **Planned** (sanity check) |
+
+### Recommended post-ETL validation report
+
+After each ETL run, generate a summary:
+
+- Products processed / failed
+- Markets scored per product
+- % of markets with missing tariff data
+- % of markets with missing World Bank context
+- Top 5 markets by score per product (spot-check)
+- Any DQ rule violations
+
+---
+
+## 8. Open questions
+
+These questions from the scoping note and data review must be resolved before Phase 1 features depending on external data can be built.
+
+| # | Question | Impact | Owner |
+|---|---|---|---|
+| OQ-1 | **Which ACCI data is currently available for our use?** (trade by industry, by destination) | Could supplement or validate Comtrade mirror data; may enable Afghanistan-specific insights | ACCI / UNDP |
+| OQ-2 | **Can we collect primary data through ACCI?** (surveys, exporter registrations) | Would enable data not available from international sources | ACCI / UNDP |
+| OQ-3 | **How to transfer subscription-based API data at handover?** (Comtrade key, ITC access, Trade Atlas) | Blocks sustainable operations post-UNDP; must be in handover plan | UNDP / ACCI |
+| OQ-4 | **What are the redistribution terms for ITC Trade Map company data?** | Blocks Top Importers Directory (FR-3.x) | ITC / UNDP legal |
+| OQ-5 | **Is a Trade Atlas or Kompass commercial licence feasible within project budget?** | Alternative source for buyer directory | UNDP procurement |
+| OQ-6 | **Can VAT and port fee data be sourced from Market Access Map or EU Access2Markets?** (no API) | Blocks full Customs & Tariff Breakdown (FR-2.4) | UNDP / ITC |
+| OQ-7 | **Should methodology version be stored alongside scores?** (for historical comparability when weights change) | Data model change; recommended yes | Engineering |
+| OQ-8 | **What is the canonical country code mapping between M49 numeric and ISO-3?** | Ongoing data quality issue (`backend/country_names.py`) | Engineering |
+
+---
+
+## 9. Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `COMTRADE_API_KEY` | Yes | UN Comtrade subscription key |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `POSTGRES_PASSWORD` | Docker only | PostgreSQL password for Docker Compose |
+
+No API keys are currently required for World Bank or WITS.
+
+---
+
+## 10. Document history
+
+| Version | Date | Author | Changes |
+|---|---|---|---|
+| 0.1 | 2026-07-01 | ICPSD Crisis Resilience team | Initial draft from scoping note, ETL pipeline, and database schema |
