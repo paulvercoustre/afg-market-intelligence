@@ -9,5 +9,5 @@ select = ["E", "F", "I", "UP"]
 ignore = ["E501", "E402"]
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "etl/tests", "tests"]
 python_files = ["test_*.py"]
