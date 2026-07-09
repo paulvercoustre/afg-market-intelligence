@@ -21,6 +21,7 @@ load_dotenv()
 # Ensure repo root is on sys.path when run as a module
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from backend.country_names import resolve_country_name
 from config import PRODUCTS, TOP_N_MARKETS, YEARS
 from etl import fetch, load, transform
 
@@ -224,12 +225,16 @@ def _resolve_market_name(global_df: pd.DataFrame, code: str) -> str | None:
     if "reporterDesc" in global_df.columns:
         match = global_df[global_df["reporterCode"] == code]["reporterDesc"]
         if not match.empty:
-            return str(match.iloc[0])
+            name = resolve_country_name(code, match.iloc[0])
+            if name:
+                return name
     if "reporterISO" in global_df.columns:
         match = global_df[global_df["reporterCode"] == code]["reporterISO"]
         if not match.empty:
-            return str(match.iloc[0])
-    return None
+            name = resolve_country_name(code, match.iloc[0])
+            if name:
+                return name
+    return resolve_country_name(code)
 
 
 def _build_market_context(wb_rows: list[dict]) -> dict[str, dict[int, dict]]:

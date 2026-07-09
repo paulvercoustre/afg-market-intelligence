@@ -5,6 +5,7 @@ from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from backend import schemas
+from backend.country_names import resolve_country_name
 from backend.models import CompetitorFlow, Indicator, Market, PipelineRun, Product, TradeFlow
 
 
@@ -54,12 +55,15 @@ def list_products(db: Session) -> list[schemas.ProductSummary]:
                     Indicator.product_id == p.id,
                     Indicator.computed_for_year == last_year,
                 )
-                .order_by(Indicator.afg_export_value_usd.desc())
+                .order_by(Indicator.afg_export_value_usd.desc().nullslast())
                 .first()
             )
             if top:
                 market = db.query(Market).filter(Market.country_code == top.market_code).first()
-                top_market_name = market.country_name if market else top.market_code
+                top_market_name = resolve_country_name(
+                    top.market_code,
+                    market.country_name if market else None,
+                )
 
         results.append(schemas.ProductSummary(
             id=p.id,
@@ -98,7 +102,7 @@ def get_product(db: Session, hs_code: str) -> schemas.ProductDetail | None:
     indicators = (
         db.query(Indicator)
         .filter(Indicator.product_id == product.id, Indicator.computed_for_year == latest_year)
-        .order_by(Indicator.afg_export_value_usd.desc())
+        .order_by(Indicator.afg_export_value_usd.desc().nullslast())
         .all()
     )
 
@@ -129,7 +133,7 @@ def get_market_detail(db: Session, hs_code: str, market_code: str) -> schemas.Ma
         return None
 
     market = db.query(Market).filter(Market.country_code == market_code).first()
-    market_name = market.country_name if market else market_code
+    market_name = resolve_country_name(market_code, market.country_name if market else None)
 
     latest_year = (
         db.query(func.max(Indicator.computed_for_year))
@@ -166,7 +170,7 @@ def get_market_detail(db: Session, hs_code: str, market_code: str) -> schemas.Ma
     competitors = [
         schemas.CompetitorRow(
             supplier_code=c.supplier_code,
-            supplier_name=c.supplier_name,
+            supplier_name=resolve_country_name(c.supplier_code, c.supplier_name),
             trade_value_usd=float(c.trade_value_usd) if c.trade_value_usd else None,
             trade_quantity=float(c.trade_quantity) if c.trade_quantity else None,
             market_share_pct=(
@@ -225,7 +229,7 @@ def get_pipeline_runs(db: Session, limit: int = 10) -> list[schemas.PipelineRunS
 def _indicator_to_schema(ind: Indicator, market: Market | None) -> schemas.MarketIndicator:
     return schemas.MarketIndicator(
         market_code=ind.market_code,
-        market_name=market.country_name if market else ind.market_code,
+        market_name=resolve_country_name(ind.market_code, market.country_name if market else None),
         afg_export_value_usd=_f(ind.afg_export_value_usd),
         global_market_size_usd=_f(ind.global_market_size_usd),
         market_share_pct=_f(ind.market_share_pct),

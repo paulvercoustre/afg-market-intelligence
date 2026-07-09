@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from backend.country_names import resolve_country_name
 from config import (
     DISTANCE_FROM_KABUL_KM,
     FTA_STATUS,
@@ -77,10 +78,9 @@ def to_competitor_flows(global_df: pd.DataFrame, product_id: int, market_codes: 
 
     rows = []
     for _, r in suppliers.iterrows():
-        supplier_name = (
-            r.get("partnerDesc")
-            or r.get("partnerISO")
-            or str(r["partnerCode"])
+        supplier_name = resolve_country_name(
+            r["partnerCode"],
+            r.get("partnerDesc") or r.get("partnerISO"),
         )
         qty = _float_or_none(r.get("qty") if "qty" in r.index else None)
         if qty is None and "netWgt" in r.index:

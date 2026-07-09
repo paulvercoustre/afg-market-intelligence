@@ -235,6 +235,36 @@ def seeded_db():
                 70.0, 55.0, 88.0, 50.0, 38.0, 33.0, 5.0, 100.0, 100.0
             FROM products p WHERE p.name = 'Saffron'
         """))
+        db.execute(text(
+            "INSERT OR IGNORE INTO markets (country_code, country_name) "
+            "VALUES ('144', 'Sri Lanka')"
+        ))
+        db.execute(text("""
+            INSERT OR IGNORE INTO indicators (
+                product_id, market_code, computed_for_year,
+                afg_export_value_usd, global_market_size_usd,
+                market_share_pct, afg_supplier_rank,
+                yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
+                first_year, last_year, price_competitiveness,
+                opportunity_score, distance_km, has_fta, language_similarity,
+                gdp_per_capita_usd, lpi_score, regulatory_quality, political_stability,
+                tariff_rate_pct, tariff_indicator,
+                score_market_size, score_market_growth, score_market_quality,
+                score_price_competitiveness, score_afg_foothold,
+                score_distance, score_language, score_fta, score_tariff
+            )
+            SELECT
+                p.id, '144', 2024,
+                NULL, 90000000,
+                NULL, NULL,
+                NULL, NULL, NULL, NULL,
+                2021, 2024, 'Average',
+                80.0, 3000, 0, 0.1,
+                4000, 3.0, 0.2, 0.1,
+                NULL, NULL,
+                90.0, 50.0, 55.0, 50.0, 25.0, 80.0, 10.0, 0.0, 50.0
+            FROM products p WHERE p.name = 'Saffron'
+        """))
         db.execute(text("""
             INSERT OR IGNORE INTO competitor_flows
                 (product_id, market_code, year, supplier_code, supplier_name,
@@ -271,6 +301,12 @@ class TestProductsList:
         assert "category" in item
         assert "hs_codes" in item
         assert "has_data" in item
+
+    def test_top_market_ignores_null_export_values(self, client, seeded_db):
+        r = client.get("/api/products")
+        assert r.status_code == 200
+        saffron = next(item for item in r.json() if item["name"] == "Saffron")
+        assert saffron["top_market_name"] == "India"
 
 
 class TestProductDetail:
@@ -357,6 +393,16 @@ class TestDiscovery:
         for i, m in enumerate(markets, start=1):
             assert m["rank"] == i
 
+    def test_ranked_markets_clean_placeholder_country_names(self, client, seeded_db):
+        with TestingSession() as db:
+            db.execute(text("UPDATE markets SET country_name = 'None' WHERE country_code = '276'"))
+            db.commit()
+
+        r = client.get("/api/discover/091020")
+        assert r.status_code == 200
+        germany = next(m for m in r.json()["markets"] if m["market_code"] == "276")
+        assert germany["market_name"] == "Germany"
+
     def test_market_row_has_score_breakdown(self, client, seeded_db):
         r = client.get("/api/discover/091020")
         assert r.status_code == 200
@@ -422,6 +468,22 @@ class TestDiscovery:
         assert "trade" in body
         assert "competitors" in body
         assert "next_steps" in body
+
+    def test_market_profile_clean_placeholder_supplier_names(self, client, seeded_db):
+        with TestingSession() as db:
+            db.execute(text("""
+                INSERT OR IGNORE INTO competitor_flows
+                    (product_id, market_code, year, supplier_code, supplier_name,
+                     trade_value_usd, trade_quantity)
+                SELECT p.id, '699', 2024, '276', '276', 1000, 10
+                FROM products p WHERE p.name = 'Saffron'
+            """))
+            db.commit()
+
+        r = client.get("/api/discover/091020/markets/699")
+        assert r.status_code == 200
+        germany = next(c for c in r.json()["competitors"] if c["supplier_code"] == "276")
+        assert germany["supplier_name"] == "Germany"
 
     def test_market_profile_next_steps_non_empty(self, client, seeded_db):
         r = client.get("/api/discover/091020/markets/699")

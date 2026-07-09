@@ -113,7 +113,7 @@ function ProductCard({ product }: { product: ProductSummary }) {
         {product.has_data ? (
           <Link
             href={`/discover/${primaryHsCode}`}
-            className="block w-full text-center text-xs font-semibold py-2 px-4 rounded-lg bg-[#0468B1] text-white hover:bg-[#035999] transition-colors"
+            className="block w-full text-center text-xs font-semibold py-2 px-4 rounded-lg bg-[#0468B1] text-white hover:bg-[#035891] transition-colors"
           >
             Discover markets →
           </Link>

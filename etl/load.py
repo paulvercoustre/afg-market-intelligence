@@ -10,6 +10,8 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from backend.country_names import resolve_country_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,12 +41,17 @@ def upsert_product(engine: Engine, name: str, category: str, hs_codes: list[str]
 
 
 def upsert_market(engine: Engine, country_code: str, country_name: str | None) -> None:
-    """Insert a market row if it does not already exist."""
+    """Insert or update a market row with a displayable country name."""
+    country_name = resolve_country_name(country_code, country_name)
     sql = text("""
         INSERT INTO markets (country_code, country_name)
         VALUES (:code, :name)
         ON CONFLICT (country_code) DO UPDATE SET
-            country_name = COALESCE(EXCLUDED.country_name, markets.country_name)
+            country_name = CASE
+                WHEN EXCLUDED.country_name IS NOT NULL THEN EXCLUDED.country_name
+                WHEN LOWER(TRIM(markets.country_name)) IN ('', 'none', 'nan', 'null', '<na>') THEN NULL
+                ELSE markets.country_name
+            END
     """)
     with engine.begin() as conn:
         conn.execute(sql, {"code": country_code, "name": country_name})
@@ -85,6 +92,13 @@ def bulk_upsert_competitor_flows(engine: Engine, rows: list[dict]) -> int:
     """
     if not rows:
         return 0
+    rows = [
+        {
+            **row,
+            "supplier_name": resolve_country_name(row["supplier_code"], row.get("supplier_name")),
+        }
+        for row in rows
+    ]
     sql = text("""
         INSERT INTO competitor_flows
             (product_id, market_code, year,
