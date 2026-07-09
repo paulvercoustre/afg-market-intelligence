@@ -2,9 +2,10 @@
 Market discovery service — serves the opportunity scoring / ranking queries.
 """
 
-
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from backend.country_names import resolve_country_name
 
 
 def get_ranked_markets(
@@ -76,10 +77,11 @@ def get_ranked_markets(
     year = rows[0]["computed_for_year"] if rows else 0
     markets = []
     for rank, r in enumerate(rows, start=1):
+        market_name = resolve_country_name(r["market_code"], r["market_name"])
         markets.append({
             "rank": rank,
             "market_code": r["market_code"],
-            "market_name": r["market_name"],
+            "market_name": market_name,
             "opportunity_score": _f(r["opportunity_score"]),
             "global_market_size_usd": _f(r["global_market_size_usd"]),
             "cagr_pct": _f(r["cagr_pct"]),
@@ -145,6 +147,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
     row = db.execute(sql, {"product_id": product_id, "market_code": market_code}).mappings().fetchone()
     if row is None:
         return None
+    market_name = resolve_country_name(market_code, row["market_name"])
 
     # Competitor flows for this market
     comp_sql = text("""
@@ -171,7 +174,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         share = (float(cr["trade_value_usd"]) / total * 100) if total and cr["trade_value_usd"] else None
         competitors.append({
             "supplier_code": cr["supplier_code"],
-            "supplier_name": cr["supplier_name"],
+            "supplier_name": resolve_country_name(cr["supplier_code"], cr["supplier_name"]),
             "trade_value_usd": _f(cr["trade_value_usd"]),
             "trade_quantity": _f(cr["trade_quantity"]),
             "market_share_pct": round(share, 2) if share else None,
@@ -181,7 +184,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         "hs_code": hs_code,
         "product_name": product_name,
         "market_code": market_code,
-        "market_name": row["market_name"],
+        "market_name": market_name,
         "opportunity_score": _f(row["opportunity_score"]),
         "score_breakdown": {
             "market_size": _f(row["score_market_size"]),
@@ -204,7 +207,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         },
         "trade": {
             "market_code": market_code,
-            "market_name": row["market_name"],
+            "market_name": market_name,
             "afg_export_value_usd": _f(row["afg_export_value_usd"]),
             "global_market_size_usd": _f(row["global_market_size_usd"]),
             "market_share_pct": _f(row["market_share_pct"]),

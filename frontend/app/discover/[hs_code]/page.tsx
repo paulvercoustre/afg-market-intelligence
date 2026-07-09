@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getDiscoveryResult } from '@/lib/api'
-import { formatUSD, formatPct, scoreBg, formatScore } from '@/lib/utils'
+import { formatUSD, formatPct } from '@/lib/utils'
 import ScoreBadge from '@/components/ScoreBadge'
 import ScoreBar from '@/components/ScoreBar'
 
@@ -68,9 +68,9 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
               key={market.market_code}
               className="bg-white rounded-xl border border-gray-200 p-4 hover:border-[#0468B1]/40 hover:shadow-sm transition-all"
             >
-              <div className="flex flex-col lg:flex-row lg:items-center gap-4">
+              <div className="flex flex-col xl:flex-row xl:items-center gap-4">
                 {/* Rank + name + score */}
-                <div className="flex items-center gap-3 min-w-0 lg:w-64 shrink-0">
+                <div className="flex items-center gap-3 min-w-0 xl:w-64 shrink-0">
                   <span className="text-sm font-bold text-gray-300 w-6 text-right shrink-0">
                     {market.rank}
                   </span>
@@ -95,7 +95,7 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                 </div>
 
                 {/* Score bars */}
-                <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-1.5">
+                <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                   {SCORE_DIMENSIONS.map((dim) => (
                     <ScoreBar
                       key={dim.key}
@@ -107,7 +107,7 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                 </div>
 
                 {/* Key metrics */}
-                <div className="lg:w-48 shrink-0 text-xs space-y-1.5">
+                <div className="xl:w-48 shrink-0 text-xs space-y-1.5">
                   <MetricRow
                     label="Global imports"
                     value={formatUSD(market.global_market_size_usd)}
@@ -124,7 +124,7 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                 </div>
 
                 {/* CTA */}
-                <div className="lg:w-28 shrink-0">
+                <div className="xl:w-28 shrink-0">
                   <Link
                     href={`/discover/${hs_code}/markets/${market.market_code}`}
                     className="block text-center text-xs font-semibold py-2 px-3 rounded-lg border border-[#0468B1] text-[#0468B1] hover:bg-[#0468B1] hover:text-white transition-colors"
