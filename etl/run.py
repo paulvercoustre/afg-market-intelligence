@@ -193,32 +193,23 @@ def _fetch_tariffs_for_product(market_codes: list[str], hs_codes: list[str],
     Returns {market_numeric_code: {'rate': float, 'indicator': str}} where rate
     is averaged across the product's HS codes.
     """
-    iso3_lookup = _load_numeric_to_iso3()
-    iso3_to_numeric = {v: k for k, v in iso3_lookup.items()}
-
-    iso3_markets = [iso3_lookup[c] for c in market_codes if c in iso3_lookup]
-    if not iso3_markets:
-        return {}
-
-    rows = fetch.fetch_tariff_rates(iso3_markets, hs_codes, years)
+    rows = fetch.fetch_tariff_rates(market_codes, hs_codes, years)
 
     # Aggregate per market: average rate across the product's HS codes.
     by_market: dict[str, list[float]] = {}
     indicator_by_market: dict[str, str] = {}
     for r in rows:
-        iso3 = r["market_iso3"]
-        by_market.setdefault(iso3, []).append(r["tariff_rate_pct"])
-        indicator_by_market[iso3] = r["indicator"]
+        code = r["market_code"]
+        by_market.setdefault(code, []).append(r["tariff_rate_pct"])
+        indicator_by_market[code] = r["indicator"]
 
-    result: dict[str, dict] = {}
-    for iso3, rates in by_market.items():
-        numeric = iso3_to_numeric.get(iso3)
-        if numeric:
-            result[numeric] = {
-                "rate": sum(rates) / len(rates),
-                "indicator": indicator_by_market.get(iso3),
-            }
-    return result
+    return {
+        code: {
+            "rate": sum(rates) / len(rates),
+            "indicator": indicator_by_market.get(code),
+        }
+        for code, rates in by_market.items()
+    }
 
 
 def _resolve_market_name(global_df: pd.DataFrame, code: str) -> str | None:
@@ -238,17 +229,32 @@ def _resolve_market_name(global_df: pd.DataFrame, code: str) -> str | None:
 
 
 def _build_market_context(wb_rows: list[dict]) -> dict[str, dict[int, dict]]:
-    """Restructure flat WB rows into {country_code: {year: {field: value}}}."""
-    ctx: dict[str, dict[int, dict]] = {}
+    """
+    Restructure flat WB rows (keyed by ISO-3) into the shape scoring expects:
+    {comtrade_numeric_code: {year: {field: value}}}.
+
+    The remap to Comtrade numeric codes is essential — transform.py looks up
+    context by the numeric market_code that appears in trade data.
+    """
+    ctx_iso3: dict[str, dict[int, dict]] = {}
     for row in wb_rows:
         cc = row["country_code"]
         yr = row["year"]
-        ctx.setdefault(cc, {})[yr] = {
-            k: row[k]
+        ctx_iso3.setdefault(cc, {})[yr] = {
+            k: _to_float(row[k])
             for k in ("gdp_usd", "gdp_per_capita_usd", "lpi_score",
                       "regulatory_quality", "political_stability")
         }
-    return ctx
+
+    return {
+        numeric: ctx_iso3[iso3]
+        for numeric, iso3 in _load_numeric_to_iso3().items()
+        if iso3 in ctx_iso3
+    }
+
+
+def _to_float(v) -> float | None:
+    return None if v is None else float(v)
 
 
 def main():
@@ -282,25 +288,28 @@ def main():
     # ── Phase A: World Bank fetch (once per run, across all markets) ──────────
     market_context: dict[str, dict[int, dict]] = {}
 
-    if not args.skip_world_bank and not args.dry_run:
-        # Collect all ISO-3 country codes from Comtrade reporter descriptions.
-        # We use a broad set of major trading nations as a pragmatic approach;
-        # the ETL will extend this as new market codes appear in trade data.
-        from config import DISTANCE_FROM_KABUL_KM
-        # Map Comtrade numeric codes to ISO-3 alpha for WB API
-        # (WB accepts ISO-3 alpha; Comtrade uses M49 numeric)
-        _numeric_to_iso3 = _load_numeric_to_iso3()
-        all_numeric_codes = list(DISTANCE_FROM_KABUL_KM.keys())
-        iso3_codes = [_numeric_to_iso3[c] for c in all_numeric_codes if c in _numeric_to_iso3]
-
-        logger.info(f"Fetching World Bank indicators for {len(iso3_codes)} countries…")
-        try:
-            wb_rows = fetch.fetch_world_bank_indicators(iso3_codes, YEARS)
+    if not args.dry_run:
+        if args.skip_world_bank:
+            # Reuse whatever a previous run stored in market_context.
+            wb_rows = load.load_market_context(engine)
             market_context = _build_market_context(wb_rows)
-            n_ctx = load.bulk_upsert_market_context(engine, wb_rows)
-            logger.info(f"Upserted {n_ctx} market_context rows")
-        except Exception as exc:
-            logger.error(f"World Bank fetch failed: {exc} — continuing without WB data")
+            logger.info(f"Loaded {len(wb_rows)} existing market_context rows (--skip-world-bank)")
+        else:
+            # Map Comtrade numeric codes to ISO-3 alpha for the WB API
+            # (WB accepts ISO-3 alpha; Comtrade uses numeric codes)
+            from config import DISTANCE_FROM_KABUL_KM
+            _numeric_to_iso3 = _load_numeric_to_iso3()
+            all_numeric_codes = list(DISTANCE_FROM_KABUL_KM.keys())
+            iso3_codes = [_numeric_to_iso3[c] for c in all_numeric_codes if c in _numeric_to_iso3]
+
+            logger.info(f"Fetching World Bank indicators for {len(iso3_codes)} countries…")
+            try:
+                wb_rows = fetch.fetch_world_bank_indicators(iso3_codes, YEARS)
+                market_context = _build_market_context(wb_rows)
+                n_ctx = load.bulk_upsert_market_context(engine, wb_rows)
+                logger.info(f"Upserted {n_ctx} market_context rows")
+            except Exception as exc:
+                logger.error(f"World Bank fetch failed: {exc} — continuing without WB data")
 
     # ── Phase B: Per-product ETL ──────────────────────────────────────────────
     results = []
@@ -324,17 +333,22 @@ def main():
 
 
 def _load_numeric_to_iso3() -> dict[str, str]:
-    """Mapping from M49 numeric codes to ISO-3 alpha codes for World Bank API."""
+    """
+    Mapping from Comtrade numeric reporter codes to ISO-3 alpha codes for the
+    World Bank API. NB: Comtrade uses non-standard codes for a few countries
+    (India 699, USA 842, Switzerland 757, France 251, Norway 579) — these must
+    match the codes that actually appear in trade data, not ISO 3166 numeric.
+    """
     return {
-        "586": "PAK", "356": "IND", "364": "IRN", "860": "UZB", "762": "TJK",
+        "586": "PAK", "699": "IND", "364": "IRN", "860": "UZB", "762": "TJK",
         "795": "TKM", "398": "KAZ", "417": "KGZ", "156": "CHN", "784": "ARE",
         "682": "SAU", "792": "TUR", "634": "QAT", "414": "KWT", "512": "OMN",
         "048": "BHR", "400": "JOR", "368": "IRQ", "818": "EGY", "276": "DEU",
-        "826": "GBR", "528": "NLD", "250": "FRA", "380": "ITA", "56": "BEL",
-        "724": "ESP", "756": "CHE", "040": "AUT", "616": "POL", "203": "CZE",
-        "752": "SWE", "246": "FIN", "578": "NOR", "208": "DNK", "372": "IRL",
+        "826": "GBR", "528": "NLD", "251": "FRA", "380": "ITA", "56": "BEL",
+        "724": "ESP", "757": "CHE", "040": "AUT", "616": "POL", "203": "CZE",
+        "752": "SWE", "246": "FIN", "579": "NOR", "208": "DNK", "372": "IRL",
         "300": "GRC", "642": "ROU", "100": "BGR", "348": "HUN", "703": "SVK",
-        "840": "USA", "124": "CAN", "484": "MEX", "076": "BRA", "032": "ARG",
+        "842": "USA", "124": "CAN", "484": "MEX", "076": "BRA", "032": "ARG",
         "392": "JPN", "410": "KOR", "702": "SGP", "458": "MYS", "360": "IDN",
         "764": "THA", "704": "VNM", "050": "BGD", "144": "LKA", "524": "NPL",
         "104": "MMR", "608": "PHL", "036": "AUS", "554": "NZL", "710": "ZAF",

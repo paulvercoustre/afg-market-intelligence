@@ -228,6 +228,21 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
     return len(rows)
 
 
+def load_market_context(engine: Engine) -> list[dict]:
+    """
+    Read existing market_context rows back from the DB (used by --skip-world-bank
+    so scoring can still use previously fetched World Bank data).
+    """
+    sql = text("""
+        SELECT country_code, year, gdp_usd, gdp_per_capita_usd, lpi_score,
+               regulatory_quality, political_stability
+        FROM market_context
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(sql)
+        return [dict(row._mapping) for row in result]
+
+
 def log_pipeline_run(engine: Engine, status: str, products_updated: int,
                      errors: list[dict]) -> None:
     sql = text("""

@@ -202,13 +202,13 @@ Afghanistan does not report directly to UN Comtrade. Instead, the pipeline uses 
 The ETL fetches per-country, per-year indicators from the World Bank API:
 - **GDP per capita** (`NY.GDP.PCAP.CD`) — market wealth / purchasing power
 - **Logistics Performance Index** (`LP.LPI.OVRL.XQ`) — supply-chain connectivity
-- **Regulatory Quality** (`RQ.EST`, WGI) — ease of doing business
-- **Political Stability** (`PV.EST`, WGI) — market risk
+- **Regulatory Quality** (`GOV_WGI_RQ.EST`, WGI) — ease of doing business
+- **Political Stability** (`GOV_WGI_PV.EST`, WGI) — market risk
 
 ### Tariffs — WITS (World Integrated Trade Solution)
-For each (market, HS code) pair, the ETL queries the WITS REST API:
-- Tries **AHS-SMPL-AVG** first — effectively applied tariff with Afghanistan as the partner (captures preferential rates from FTAs)
-- Falls back to **MFN-SMPL-AVG** when no AHS data is available — the Most Favoured Nation rate that applies by default
+For each market, the ETL queries the WITS TRN (UNCTAD TRAINS) REST API:
+- Tries **Afghanistan-specific applied rates** first (partner = Afghanistan; captures preferential rates from FTAs) — reported as `AHS`
+- Falls back to **MFN rates** (partner = World) when no Afghanistan-specific data is available — reported as `MFN`
 
 The `tariff_indicator` field on each market profile tells you which series the rate came from.
 

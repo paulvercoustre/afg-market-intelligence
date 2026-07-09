@@ -173,13 +173,15 @@ def fetch_global_imports(hs_code: str, years: list[int]) -> pd.DataFrame:
 
 _WB_BASE = "https://api.worldbank.org/v2"
 
-# Indicator codes we fetch from WDI and WGI
+# Indicator codes we fetch from WDI and WGI.
+# NB: the WGI codes were renamed by the World Bank — the old RQ.EST / PV.EST
+# codes are archived and return "indicator not found".
 _WB_INDICATORS = {
     "gdp_usd": "NY.GDP.MKTP.CD",
     "gdp_per_capita_usd": "NY.GDP.PCAP.CD",
     "lpi_score": "LP.LPI.OVRL.XQ",
-    "regulatory_quality": "RQ.EST",
-    "political_stability": "PV.EST",
+    "regulatory_quality": "GOV_WGI_RQ.EST",
+    "political_stability": "GOV_WGI_PV.EST",
 }
 
 _WB_SESSION = requests.Session()
@@ -201,6 +203,11 @@ def _fetch_wb_indicator(country_code: str, indicator_code: str, years: list[int]
     resp.raise_for_status()
 
     data = resp.json()
+    # The WB API signals errors (e.g. unknown indicator) with HTTP 200 and a
+    # single-element message payload — surface those instead of returning empty.
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) and "message" in data[0]:
+        messages = data[0]["message"]
+        raise ValueError(f"World Bank API error for {indicator_code}: {messages}")
     if not isinstance(data, list) or len(data) < 2:
         return {}
 
@@ -256,53 +263,38 @@ def fetch_world_bank_indicators(country_codes: list[str], years: list[int]) -> l
 
 
 # ── WITS tariff data ─────────────────────────────────────────────────────────
-# WITS (World Integrated Trade Solution) by World Bank.
-# Returns SDMX/JSON. Endpoint format:
-#   reporter/{ISO3|ALL}/year/{YYYY}/partner/{ISO3|000}/product/all/indicator/{CODE}
+# WITS (World Integrated Trade Solution) — UNCTAD TRAINS tariff database.
+# SDMX 2.1 REST endpoint. Working URL format (segment order matters):
+#   /datasource/TRN/reporter/{NUM}/partner/{NUM}/product/{HS6|all}/year/{YYYY}/datatype/reported
 #
-# Indicator codes:
-#   AHS-SMPL-AVG = Effectively applied tariff, simple average (preferential rates included)
-#   MFN-SMPL-AVG = Most-Favoured Nation tariff, simple average (no preference)
-#
-# Strategy: use reporter=ALL to fetch all countries in a single call per (year, indicator).
-# Falls back to per-country calls if ALL is unsupported (some WITS deployments restrict it).
+# - Country codes are UN numeric, zero-padded to 3 digits (India=356, AFG=004,
+#   World partner=000). ISO-3 alpha codes and reporter=ALL are rejected (403/400).
+# - AHS vs MFN is selected via the partner segment, not an indicator code:
+#   partner=000 → MFN rates; partner=004 → rates applied specifically to
+#   Afghanistan (preferential where a scheme exists). 404 = not reported.
+# - We request product/all per (reporter, partner, year) and cache the parsed
+#   result, so each market's full tariff schedule is downloaded once per run
+#   and shared across all products.
 
-_WITS_BASE = "http://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN"
+_WITS_BASE = "https://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN"
 
 _WITS_SESSION = requests.Session()
 _WITS_SESSION.verify = certifi.where()
 
+_WITS_AFG_PARTNER = "004"
+_WITS_WORLD_PARTNER = "000"
 
-@retry(
-    retry=retry_if_exception_type((ConnectionError, TimeoutError, requests.RequestException)),
-    wait=wait_exponential(multiplier=1, min=2, max=16),
-    stop=stop_after_attempt(3),
-    reraise=True,
-)
-def _fetch_wits_all_reporters(year: int, partner_iso3: str | None,
-                              indicator: str) -> dict[str, dict[str, float]]:
-    """
-    Fetch WITS tariff data for ALL reporters in one call.
-    Returns {reporter_iso3: {hs_code: tariff_pct}}, or {} if the year is unavailable.
+# Comtrade reporter codes that differ from the UN numeric codes WITS uses.
+_COMTRADE_TO_WITS_NUMERIC = {
+    "699": "356",  # India
+    "842": "840",  # United States
+    "757": "756",  # Switzerland
+    "251": "250",  # France
+    "579": "578",  # Norway
+}
 
-    partner_iso3=None → MFN rates (partner segment = 000).
-    """
-    partner_segment = partner_iso3 if partner_iso3 else "000"
-    url = (
-        f"{_WITS_BASE}/reporter/ALL/year/{year}"
-        f"/partner/{partner_segment}/product/all/indicator/{indicator}"
-    )
-    resp = _WITS_SESSION.get(url, params={"format": "JSON"}, timeout=120)
-    if resp.status_code in (403, 404):
-        return {}
-    resp.raise_for_status()
-
-    try:
-        data = resp.json()
-    except ValueError:
-        return {}
-
-    return _parse_wits_response_all_reporters(data)
+# {(reporter, partner, year): {hs6: rate}} — one fetch per key per process
+_wits_cache: dict[tuple[str, str, int], dict[str, float]] = {}
 
 
 @retry(
@@ -311,19 +303,18 @@ def _fetch_wits_all_reporters(year: int, partner_iso3: str | None,
     stop=stop_after_attempt(3),
     reraise=True,
 )
-def _fetch_wits_single_reporter(reporter_iso3: str, year: int, partner_iso3: str | None,
-                                indicator: str) -> dict[str, float]:
+def _fetch_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, float]:
     """
-    Fetch WITS tariff data for one reporter. Fallback when reporter=ALL is unavailable.
-    Returns {hs_code: tariff_pct}.
+    Fetch the full tariff schedule one reporter applies to one partner in one year.
+    Returns {hs6_code: simple_average_rate_pct}; {} when the combination was
+    never reported (HTTP 404 — normal, e.g. no preferential scheme for AFG).
     """
-    partner_segment = partner_iso3 if partner_iso3 else "000"
     url = (
-        f"{_WITS_BASE}/reporter/{reporter_iso3}/year/{year}"
-        f"/partner/{partner_segment}/product/all/indicator/{indicator}"
+        f"{_WITS_BASE}/reporter/{reporter}/partner/{partner}"
+        f"/product/all/year/{year}/datatype/reported"
     )
-    resp = _WITS_SESSION.get(url, params={"format": "JSON"}, timeout=30)
-    if resp.status_code in (403, 404):
+    resp = _WITS_SESSION.get(url, params={"format": "JSON"}, timeout=180)
+    if resp.status_code == 404:
         return {}
     resp.raise_for_status()
 
@@ -332,182 +323,125 @@ def _fetch_wits_single_reporter(reporter_iso3: str, year: int, partner_iso3: str
     except ValueError:
         return {}
 
-    return _parse_wits_response_single_reporter(data)
+    return _parse_wits_tariffs(data)
 
 
-def _parse_wits_response_all_reporters(data: dict) -> dict[str, dict[str, float]]:
+def _parse_wits_tariffs(data: dict) -> dict[str, float]:
     """
-    Parse an ALL-reporter SDMX-JSON response into {reporter_iso3: {hs_code: rate}}.
-    The series key has an extra REPORTER dimension compared to the single-reporter response.
-    """
-    try:
-        dimensions = data["structure"]["dimensions"]["series"]
-        reporter_dim_idx = product_dim_idx = None
-        reporter_values: list[str] = []
-        product_values: list[str] = []
+    Parse an SDMX-JSON TRN response into {hs_code: rate}.
 
-        for i, dim in enumerate(dimensions):
-            if dim.get("id") == "REPORTER":
-                reporter_dim_idx = i
-                reporter_values = [v["id"] for v in dim["values"]]
-            elif dim.get("id") == "PRODUCTCODE":
-                product_dim_idx = i
-                product_values = [v["id"] for v in dim["values"]]
-
-        if reporter_dim_idx is None or product_dim_idx is None:
-            return {}
-
-        result: dict[str, dict[str, float]] = {}
-        for series_key, series in data["dataSets"][0]["series"].items():
-            parts = series_key.split(":")
-            reporter = reporter_values[int(parts[reporter_dim_idx])]
-            hs_code = product_values[int(parts[product_dim_idx])]
-            obs = series.get("observations", {}).get("0")
-            if obs and obs[0] is not None:
-                result.setdefault(reporter, {})[hs_code] = float(obs[0])
-        return result
-    except (KeyError, IndexError, ValueError, TypeError):
-        return {}
-
-
-def _parse_wits_response_single_reporter(data: dict) -> dict[str, float]:
-    """
-    Parse a single-reporter SDMX-JSON response into {hs_code: rate}.
+    The rate is the first element of each observation value array. The series
+    key slot that indexes PRODUCTCODE is located empirically: the keyPosition
+    attributes in WITS responses do not match the actual key ordering.
     """
     try:
         dimensions = data["structure"]["dimensions"]["series"]
-        product_dim_idx = None
         product_values: list[str] = []
-        for i, dim in enumerate(dimensions):
+        for dim in dimensions:
             if dim.get("id") == "PRODUCTCODE":
-                product_dim_idx = i
                 product_values = [v["id"] for v in dim["values"]]
                 break
-        if product_dim_idx is None:
+        if not product_values:
             return {}
 
+        series = data["dataSets"][0]["series"]
+        if not series:
+            return {}
+
+        product_slot = None
+        if len(product_values) > 1:
+            n_slots = len(next(iter(series)).split(":"))
+            max_per_slot = [0] * n_slots
+            for key in series:
+                for i, part in enumerate(key.split(":")):
+                    max_per_slot[i] = max(max_per_slot[i], int(part))
+            candidates = [
+                i for i, m in enumerate(max_per_slot)
+                if m == len(product_values) - 1 and m > 0
+            ]
+            if not candidates:
+                logger.warning("WITS response: could not locate PRODUCTCODE key slot")
+                return {}
+            product_slot = candidates[0]
+
         result: dict[str, float] = {}
-        for series_key, series in data["dataSets"][0]["series"].items():
-            product_idx = int(series_key.split(":")[product_dim_idx])
-            hs_code = product_values[product_idx]
-            obs = series.get("observations", {}).get("0")
+        for key, s in series.items():
+            if product_slot is None:
+                hs_code = product_values[0]
+            else:
+                hs_code = product_values[int(key.split(":")[product_slot])]
+            observations = s.get("observations") or {}
+            obs = observations.get("0")
+            if obs is None and observations:
+                obs = next(iter(observations.values()))
             if obs and obs[0] is not None:
                 result[hs_code] = float(obs[0])
         return result
     except (KeyError, IndexError, ValueError, TypeError):
+        logger.warning("Failed to parse WITS SDMX-JSON response")
         return {}
 
 
-def fetch_tariff_rates(market_iso3_codes: list[str], hs_codes: list[str],
-                       years: list[int], partner_iso3: str = "AFG") -> list[dict]:
-    """
-    Fetch tariff rates for all markets in as few API calls as possible.
+def _cached_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, float]:
+    key = (reporter, partner, year)
+    if key not in _wits_cache:
+        try:
+            _wits_cache[key] = _fetch_wits_tariffs(reporter, partner, year)
+        except Exception as exc:
+            logger.warning(f"WITS fetch failed for reporter {reporter} partner {partner} {year}: {exc}")
+            _wits_cache[key] = {}
+        time.sleep(0.5)
+    return _wits_cache[key]
 
-    Strategy: use reporter=ALL to get every country in one call per (year, indicator).
-    Tries years descending until a year with data is found (WITS lags 2–3 years).
-    Within each year, tries AHS (Afghanistan-specific preferential rates) first,
-    then falls back to MFN (general rate).
-    If reporter=ALL fails, falls back to per-country calls.
+
+def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
+                       years: list[int]) -> list[dict]:
+    """
+    Fetch tariff rates for the given markets (Comtrade numeric codes) and HS codes.
+
+    Per market, years are tried descending (WITS lags 2–3 years behind trade
+    data). Within a year, Afghanistan-specific applied rates ('AHS', partner=004)
+    are preferred, falling back to MFN rates (partner=000).
+
+    Downloads are cached per (reporter, partner, year) covering all products,
+    so subsequent calls for other products reuse them.
 
     Returns list of dicts:
-      {market_iso3: str, hs_code: str, tariff_rate_pct: float, indicator: 'AHS'|'MFN'}
+      {market_code: str, hs_code: str, tariff_rate_pct: float, indicator: 'AHS'|'MFN'}
     """
     hs_set = {h.replace(".", "") for h in hs_codes}
     years_desc = sorted(years, reverse=True)
 
-    # --- Attempt bulk fetch (reporter=ALL) ---
-    # {reporter_iso3: {hs_code: rate}}
-    bulk_ahs: dict[str, dict[str, float]] = {}
-    bulk_mfn: dict[str, dict[str, float]] = {}
-    bulk_year_used: int | None = None
-    bulk_failed = False
-
-    for year in years_desc:
-        try:
-            bulk_ahs = _fetch_wits_all_reporters(year, partner_iso3, "AHS-SMPL-AVG")
-        except Exception as exc:
-            logger.warning(f"WITS bulk AHS fetch failed for {year}: {exc}")
-            bulk_failed = True
-            break
-
-        try:
-            bulk_mfn = _fetch_wits_all_reporters(year, None, "MFN-SMPL-AVG")
-        except Exception as exc:
-            logger.warning(f"WITS bulk MFN fetch failed for {year}: {exc}")
-            bulk_failed = True
-            break
-
-        if bulk_ahs or bulk_mfn:
-            bulk_year_used = year
-            if year < years_desc[0]:
-                logger.info(f"WITS bulk: using {year} data (latest year unavailable)")
-            break
-
-    if not bulk_failed and bulk_year_used is not None:
-        logger.info(
-            f"WITS bulk fetch complete for {year}: "
-            f"{len(bulk_ahs)} AHS reporters, {len(bulk_mfn)} MFN reporters"
-        )
-        rows = []
-        for market_iso3 in market_iso3_codes:
-            tariffs = bulk_ahs.get(market_iso3, {})
-            indicator_used = "AHS"
-            if not tariffs:
-                tariffs = bulk_mfn.get(market_iso3, {})
-                indicator_used = "MFN"
-            for hs in hs_set:
-                rate = tariffs.get(hs)
-                if rate is not None:
-                    rows.append({
-                        "market_iso3": market_iso3,
-                        "hs_code": hs,
-                        "tariff_rate_pct": float(rate),
-                        "indicator": indicator_used,
-                    })
-        logger.info(f"WITS tariff fetch complete: {len(rows)} rates across {len(market_iso3_codes)} markets")
-        return rows
-
-    # --- Fallback: per-country calls ---
-    logger.info("WITS reporter=ALL unavailable, falling back to per-country fetch")
     rows = []
-    for market_iso3 in market_iso3_codes:
-        tariffs: dict[str, float] = {}
-        indicator_used = "MFN"
+    for market_code in market_codes:
+        reporter = _COMTRADE_TO_WITS_NUMERIC.get(market_code, market_code).zfill(3)
 
+        found: dict[str, float] = {}
+        indicator_used = None
         for year in years_desc:
-            try:
-                tariffs = _fetch_wits_single_reporter(market_iso3, year, partner_iso3, "AHS-SMPL-AVG")
+            ahs = _cached_wits_tariffs(reporter, _WITS_AFG_PARTNER, year)
+            found = {hs: ahs[hs] for hs in hs_set if hs in ahs}
+            if found:
                 indicator_used = "AHS"
-            except Exception as exc:
-                logger.warning(f"WITS AHS fetch failed for {market_iso3} {year}: {exc}")
-                tariffs = {}
-
-            if not tariffs:
-                try:
-                    tariffs = _fetch_wits_single_reporter(market_iso3, year, None, "MFN-SMPL-AVG")
+            else:
+                mfn = _cached_wits_tariffs(reporter, _WITS_WORLD_PARTNER, year)
+                found = {hs: mfn[hs] for hs in hs_set if hs in mfn}
+                if found:
                     indicator_used = "MFN"
-                except Exception as exc:
-                    logger.warning(f"WITS MFN fetch failed for {market_iso3} {year}: {exc}")
-                    tariffs = {}
-
-            if tariffs:
+            if found:
                 if year < years_desc[0]:
-                    logger.info(f"WITS: using {year} data for {market_iso3} (latest year unavailable)")
+                    logger.debug(f"WITS: using {year} data for market {market_code}")
                 break
 
-        for hs in hs_set:
-            rate = tariffs.get(hs)
-            if rate is not None:
-                rows.append({
-                    "market_iso3": market_iso3,
-                    "hs_code": hs,
-                    "tariff_rate_pct": float(rate),
-                    "indicator": indicator_used,
-                })
+        for hs, rate in found.items():
+            rows.append({
+                "market_code": market_code,
+                "hs_code": hs,
+                "tariff_rate_pct": float(rate),
+                "indicator": indicator_used,
+            })
 
-        time.sleep(0.3)
-
-    logger.info(f"WITS tariff fetch complete: {len(rows)} rates across {len(market_iso3_codes)} markets")
+    logger.info(f"WITS tariff fetch complete: {len(rows)} rates across {len(market_codes)} markets")
     return rows
 
 
