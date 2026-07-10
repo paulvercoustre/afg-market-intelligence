@@ -6,6 +6,7 @@ import pytest
 
 from config import OPPORTUNITY_SCORE_WEIGHTS, TARIFF_SCORE_PER_PCT
 from etl.transform import (
+    _latest_wb_context,
     _score_distance,
     _score_foothold,
     _score_growth,
@@ -62,13 +63,32 @@ class TestDimensionScores:
         assert _score_tariff(10) == pytest.approx(100.0 - 10 * TARIFF_SCORE_PER_PCT)
 
 
+class TestLatestWbContext:
+    def test_merges_latest_non_null_per_field(self):
+        # LPI is a triennial survey: latest year has GDP but null LPI
+        ctx_by_year = {
+            2022: {"gdp_per_capita_usd": 2280.0, "lpi_score": 3.4},
+            2024: {"gdp_per_capita_usd": 2592.0, "lpi_score": None},
+        }
+        ctx = _latest_wb_context(ctx_by_year, 2024)
+        assert ctx["gdp_per_capita_usd"] == 2592.0  # newest wins
+        assert ctx["lpi_score"] == 3.4              # falls back to 2022
+
+    def test_ignores_years_after_cutoff(self):
+        ctx_by_year = {2023: {"lpi_score": 3.0}, 2025: {"lpi_score": 4.0}}
+        assert _latest_wb_context(ctx_by_year, 2024) == {"lpi_score": 3.0}
+
+    def test_empty(self):
+        assert _latest_wb_context({}, 2024) == {}
+
+
 class TestEnrichIndicatorsWithScores:
     def test_adds_all_score_fields(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
-            market_context={"356": {2024: {"lpi_score": 3.5, "regulatory_quality": 0.5}}},
-            all_market_sizes={"356": 10_000_000},
-            tariffs={"356": {"rate": 5.0, "indicator": "MFN"}},
+            market_context={"699": {2024: {"lpi_score": 3.5, "regulatory_quality": 0.5}}},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN"}},
         )
         row = rows[0]
         score_keys = [
@@ -85,7 +105,7 @@ class TestEnrichIndicatorsWithScores:
         rows = enrich_indicators_with_scores(
             [row],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
             tariffs={},
         )
         enriched = rows[0]
@@ -107,7 +127,7 @@ class TestEnrichIndicatorsWithScores:
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
         )
         row = rows[0]
         assert row["score_market_quality"] == pytest.approx(50.0)
@@ -116,11 +136,11 @@ class TestEnrichIndicatorsWithScores:
         assert row["tariff_rate_pct"] is None
 
     def test_fta_bonus_applied(self, sample_indicator_row):
-        # India (356) has partial FTA in config
+        # India (699) has partial FTA in config
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
         )
         assert rows[0]["has_fta"] is True
         assert rows[0]["score_fta"] == pytest.approx(100.0)

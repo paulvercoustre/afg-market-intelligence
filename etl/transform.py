@@ -405,11 +405,20 @@ def enrich_indicators_with_scores(
 
 
 def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
-    """Return the most recent World Bank context at or before up_to_year."""
-    eligible = {yr: v for yr, v in ctx_by_year.items() if yr <= up_to_year}
-    if not eligible:
-        return {}
-    return eligible[max(eligible)]
+    """
+    Return the most recent World Bank value per field at or before up_to_year.
+
+    Fields are resolved independently because indicators refresh on different
+    cycles — e.g. the LPI survey is triennial, so the latest year's record may
+    have GDP but a null LPI while an earlier year has the survey value.
+    """
+    eligible_years = sorted((yr for yr in ctx_by_year if yr <= up_to_year), reverse=True)
+    merged: dict = {}
+    for yr in eligible_years:
+        for field, value in ctx_by_year[yr].items():
+            if value is not None and field not in merged:
+                merged[field] = value
+    return merged
 
 
 def _score_market_size(size_usd: float | None, log_max: float) -> float:

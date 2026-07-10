@@ -38,11 +38,13 @@ OPPORTUNITY_SCORE_WEIGHTS = {
 TARIFF_SCORE_PER_PCT = 3.0
 
 # ── Geographic distance from Kabul, Afghanistan (approximate km) ───────────────
-# Keyed by Comtrade reporter/ISO numeric string (same codes used in trade data).
+# Keyed by Comtrade reporter numeric string (same codes used in trade data).
+# NB: Comtrade uses non-standard numeric codes for some countries — India 699,
+# USA 842, Switzerland 757, France 251, Norway 579 — not the ISO 3166 numeric.
 # Values are straight-line distances; rough approximations sufficient for scoring.
 DISTANCE_FROM_KABUL_KM: dict[str, int] = {
     "586": 450,    # Pakistan
-    "356": 1000,   # India
+    "699": 1000,   # India
     "364": 600,    # Iran
     "860": 600,    # Uzbekistan
     "762": 400,    # Tajikistan
@@ -63,17 +65,17 @@ DISTANCE_FROM_KABUL_KM: dict[str, int] = {
     "276": 5500,   # Germany
     "826": 6000,   # United Kingdom
     "528": 6000,   # Netherlands
-    "250": 6000,   # France
+    "251": 6000,   # France
     "380": 5500,   # Italy
     "56": 6000,    # Belgium
     "724": 6500,   # Spain
-    "756": 5500,   # Switzerland
+    "757": 5500,   # Switzerland
     "040": 5000,   # Austria
     "616": 5500,   # Poland
     "203": 5500,   # Czech Republic
     "752": 5500,   # Sweden
     "246": 5500,   # Finland
-    "578": 5500,   # Norway
+    "579": 5500,   # Norway
     "208": 6000,   # Denmark
     "372": 6000,   # Ireland
     "300": 4500,   # Greece
@@ -81,7 +83,7 @@ DISTANCE_FROM_KABUL_KM: dict[str, int] = {
     "100": 4500,   # Bulgaria
     "348": 5000,   # Hungary
     "703": 5000,   # Slovakia
-    "840": 12000,  # United States
+    "842": 12000,  # United States
     "124": 11000,  # Canada
     "484": 13000,  # Mexico
     "076": 13000,  # Brazil
@@ -123,7 +125,7 @@ LANGUAGE_SIMILARITY: dict[str, float] = {
     "795": 0.3,    # Turkmenistan
     "398": 0.25,   # Kazakhstan
     "417": 0.25,   # Kyrgyzstan
-    "356": 0.2,    # India — Hindi/Urdu shares Persian loanwords
+    "699": 0.2,    # India — Hindi/Urdu shares Persian loanwords
     "050": 0.2,    # Bangladesh
     "144": 0.15,   # Sri Lanka
     "524": 0.15,   # Nepal
@@ -136,7 +138,7 @@ LANGUAGE_SIMILARITY: dict[str, float] = {
     "400": 0.3,    # Jordan
     "634": 0.3,    # Qatar
     "818": 0.3,    # Egypt
-    "840": 0.1,    # USA
+    "842": 0.1,    # USA
     "826": 0.1,    # UK
     "124": 0.1,    # Canada
     "036": 0.1,    # Australia
@@ -149,7 +151,7 @@ LANGUAGE_SIMILARITY_DEFAULT = 0.05
 # Values: 'full', 'partial', or None.
 FTA_STATUS: dict[str, str] = {
     # SAARC Preferential Trading Arrangement (SAPTA)
-    "356": "partial",   # India
+    "699": "partial",   # India
     "586": "partial",   # Pakistan
     "050": "partial",   # Bangladesh
     "144": "partial",   # Sri Lanka
@@ -168,17 +170,17 @@ FTA_STATUS: dict[str, str] = {
     # EU GSP+ (significant tariff reduction)
     "276": "partial",   # Germany
     "528": "partial",   # Netherlands
-    "250": "partial",   # France
+    "251": "partial",   # France
     "380": "partial",   # Italy
     "56": "partial",    # Belgium
     "724": "partial",   # Spain
-    "756": "partial",   # Switzerland (GSP)
+    "757": "partial",   # Switzerland (GSP)
     "040": "partial",   # Austria
     "616": "partial",   # Poland
     "203": "partial",   # Czech Republic
     "752": "partial",   # Sweden
     "246": "partial",   # Finland
-    "578": "partial",   # Norway (GSP)
+    "579": "partial",   # Norway (GSP)
     "208": "partial",   # Denmark
     "372": "partial",   # Ireland
     "300": "partial",   # Greece

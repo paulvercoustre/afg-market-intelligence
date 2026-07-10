@@ -114,8 +114,8 @@ Sources from the scoping note are classified into three tiers based on current i
 | `gdp_usd` | `NY.GDP.MKTP.CD` | GDP (current USD) |
 | `gdp_per_capita_usd` | `NY.GDP.PCAP.CD` | GDP per capita (current USD) |
 | `lpi_score` | `LP.LPI.OVRL.XQ` | Logistics Performance Index (overall) |
-| `regulatory_quality` | `RQ.EST` | WGI: Regulatory Quality (estimate) |
-| `political_stability` | `PV.EST` | WGI: Political Stability (estimate) |
+| `regulatory_quality` | `GOV_WGI_RQ.EST` | WGI: Regulatory Quality (estimate) |
+| `political_stability` | `GOV_WGI_PV.EST` | WGI: Political Stability (estimate) |
 
 **Granularity:** Country (ISO-3), annual.
 
@@ -128,24 +128,26 @@ Sources from the scoping note are classified into three tiers based on current i
 | Attribute | Value |
 |---|---|
 | **Provider** | World Bank |
-| **API** | Yes — SDMX/JSON `http://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN` |
+| **API** | Yes — SDMX/JSON `https://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN` |
 | **Access** | No key required |
-| **Rate limits** | Bulk fetch preferred (`reporter=ALL`); per-country fallback with 0.3s delay |
+| **Rate limits** | One `product/all` call per (reporter, partner, year), cached across products; 0.5s delay between calls |
 | **Licensing** | World Bank open data terms |
 | **Cost** | Free |
 | **Refresh cadence** | Monthly (with ETL) |
 | **Fallback** | No tariff data → neutral tariff score (50); `tariff_rate_pct = NULL` |
 
-**Indicators used:**
+**Rates used** (selected via the `partner` URL segment; endpoint format is
+`reporter/{NUM}/partner/{NUM}/product/{HS6|all}/year/{YYYY}/datatype/reported`
+with UN numeric country codes):
 
-| WITS indicator | Description | Priority |
-|---|---|---|
-| `AHS-SMPL-AVG` | Effectively applied tariff, simple average (preferential, partner=AFG) | First |
-| `MFN-SMPL-AVG` | MFN tariff, simple average (partner=000) | Fallback |
+| Rate | Partner segment | Description | Priority |
+|---|---|---|---|
+| `AHS` | `004` (Afghanistan) | Effectively applied tariff, simple average (preferential where a scheme exists) | First |
+| `MFN` | `000` (World) | Most-Favoured Nation tariff, simple average | Fallback |
 
-**Strategy:** For each year (descending), fetch AHS rates for all reporters in one bulk call. If AHS unavailable for a market, use MFN. WITS data typically lags 2–3 years behind Comtrade.
+**Strategy:** Per market, for each year (descending), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade.
 
-**Granularity:** 6-digit HS code, country (ISO-3), annual.
+**Granularity:** 6-digit HS code, country (UN numeric code), annual.
 
 **Storage:** Denormalised into `indicators.tariff_rate_pct` and `indicators.tariff_indicator`.
 
