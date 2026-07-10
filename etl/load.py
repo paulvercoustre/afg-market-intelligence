@@ -245,9 +245,11 @@ def load_market_context(engine: Engine) -> list[dict]:
 
 def log_pipeline_run(engine: Engine, status: str, products_updated: int,
                      errors: list[dict]) -> None:
+    # CAST(... AS JSONB) instead of ::jsonb — SQLAlchemy's text() mis-parses
+    # a bind param immediately followed by a double-colon cast.
     sql = text("""
         INSERT INTO pipeline_runs (run_at, status, products_updated, errors_json)
-        VALUES (NOW(), :status, :products_updated, :errors_json::jsonb)
+        VALUES (NOW(), :status, :products_updated, CAST(:errors_json AS JSONB))
     """)
     import json
     with engine.begin() as conn:

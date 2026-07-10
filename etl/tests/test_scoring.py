@@ -6,6 +6,7 @@ import pytest
 
 from config import OPPORTUNITY_SCORE_WEIGHTS, TARIFF_SCORE_PER_PCT
 from etl.transform import (
+    _latest_wb_context,
     _score_distance,
     _score_foothold,
     _score_growth,
@@ -60,6 +61,25 @@ class TestDimensionScores:
         assert _score_tariff(0) == pytest.approx(100.0)
         assert _score_tariff(33.33) == pytest.approx(0.0, abs=0.1)
         assert _score_tariff(10) == pytest.approx(100.0 - 10 * TARIFF_SCORE_PER_PCT)
+
+
+class TestLatestWbContext:
+    def test_merges_latest_non_null_per_field(self):
+        # LPI is a triennial survey: latest year has GDP but null LPI
+        ctx_by_year = {
+            2022: {"gdp_per_capita_usd": 2280.0, "lpi_score": 3.4},
+            2024: {"gdp_per_capita_usd": 2592.0, "lpi_score": None},
+        }
+        ctx = _latest_wb_context(ctx_by_year, 2024)
+        assert ctx["gdp_per_capita_usd"] == 2592.0  # newest wins
+        assert ctx["lpi_score"] == 3.4              # falls back to 2022
+
+    def test_ignores_years_after_cutoff(self):
+        ctx_by_year = {2023: {"lpi_score": 3.0}, 2025: {"lpi_score": 4.0}}
+        assert _latest_wb_context(ctx_by_year, 2024) == {"lpi_score": 3.0}
+
+    def test_empty(self):
+        assert _latest_wb_context({}, 2024) == {}
 
 
 class TestEnrichIndicatorsWithScores:
