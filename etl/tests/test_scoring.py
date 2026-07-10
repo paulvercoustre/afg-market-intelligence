@@ -66,9 +66,9 @@ class TestEnrichIndicatorsWithScores:
     def test_adds_all_score_fields(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
-            market_context={"356": {2024: {"lpi_score": 3.5, "regulatory_quality": 0.5}}},
-            all_market_sizes={"356": 10_000_000},
-            tariffs={"356": {"rate": 5.0, "indicator": "MFN"}},
+            market_context={"699": {2024: {"lpi_score": 3.5, "regulatory_quality": 0.5}}},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN"}},
         )
         row = rows[0]
         score_keys = [
@@ -85,7 +85,7 @@ class TestEnrichIndicatorsWithScores:
         rows = enrich_indicators_with_scores(
             [row],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
             tariffs={},
         )
         enriched = rows[0]
@@ -107,7 +107,7 @@ class TestEnrichIndicatorsWithScores:
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
         )
         row = rows[0]
         assert row["score_market_quality"] == pytest.approx(50.0)
@@ -116,11 +116,11 @@ class TestEnrichIndicatorsWithScores:
         assert row["tariff_rate_pct"] is None
 
     def test_fta_bonus_applied(self, sample_indicator_row):
-        # India (356) has partial FTA in config
+        # India (699) has partial FTA in config
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
-            all_market_sizes={"356": 10_000_000},
+            all_market_sizes={"699": 10_000_000},
         )
         assert rows[0]["has_fta"] is True
         assert rows[0]["score_fta"] == pytest.approx(100.0)

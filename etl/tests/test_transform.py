@@ -44,8 +44,8 @@ class TestToTradeFlows:
 
 class TestToCompetitorFlows:
     def test_excludes_world_aggregate(self, global_df):
-        rows = to_competitor_flows(global_df, PRODUCT_ID, ["356"])
-        assert all(r["market_code"] == "356" for r in rows)
+        rows = to_competitor_flows(global_df, PRODUCT_ID, ["699"])
+        assert all(r["market_code"] == "699" for r in rows)
         assert all(r["supplier_code"] != "0" for r in rows)
 
     def test_filters_by_market_codes(self, global_df):
@@ -54,12 +54,12 @@ class TestToCompetitorFlows:
         assert {r["supplier_code"] for r in rows} == {"004", "156"}
 
     def test_resolves_supplier_name(self, global_df):
-        rows = to_competitor_flows(global_df, PRODUCT_ID, ["356"])
+        rows = to_competitor_flows(global_df, PRODUCT_ID, ["699"])
         afg = next(r for r in rows if r["supplier_code"] == "004")
         assert afg["supplier_name"] == "Afghanistan"
 
     def test_empty_input(self):
-        assert to_competitor_flows(pd.DataFrame(), PRODUCT_ID, ["356"]) == []
+        assert to_competitor_flows(pd.DataFrame(), PRODUCT_ID, ["699"]) == []
 
 
 class TestGrowthMetrics:
@@ -100,23 +100,23 @@ class TestComputeIndicators:
         assert codes == set(MARKET_CODES)
 
     def test_market_share(self, mirror_df, global_df):
-        rows = compute_indicators(PRODUCT_ID, ["356"], mirror_df, global_df, YEARS)
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
         row = rows[0]
         # 200_000 / 10_000_000 * 100 = 2.0%
         assert row["market_share_pct"] == pytest.approx(2.0)
 
     def test_afg_supplier_rank(self, mirror_df, global_df):
-        rows = compute_indicators(PRODUCT_ID, ["356"], mirror_df, global_df, YEARS)
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
         # Afghanistan is smallest of 3 suppliers in 2024
         assert rows[0]["afg_supplier_rank"] == 3
 
     def test_unit_price_from_quantity(self, mirror_df, global_df):
-        rows = compute_indicators(PRODUCT_ID, ["356"], mirror_df, global_df, YEARS)
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
         # 200_000 / 20_000 = 10.0
         assert rows[0]["unit_price_usd"] == pytest.approx(10.0)
 
     def test_price_competitiveness_label(self, mirror_df, global_df):
-        rows = compute_indicators(PRODUCT_ID, ["840"], mirror_df, global_df, YEARS)
+        rows = compute_indicators(PRODUCT_ID, ["842"], mirror_df, global_df, YEARS)
         row = rows[0]
         # Afg $10 vs market avg ~$15.67 → ~36% below → Highly Competitive
         assert row["price_competitiveness"] == "Highly Competitive"
@@ -126,5 +126,5 @@ class TestComputeIndicators:
         assert compute_indicators(PRODUCT_ID, MARKET_CODES, pd.DataFrame(), global_df, YEARS) == []
 
     def test_computed_for_latest_year(self, mirror_df, global_df):
-        rows = compute_indicators(PRODUCT_ID, ["356"], mirror_df, global_df, YEARS)
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
         assert rows[0]["computed_for_year"] == max(YEARS)
