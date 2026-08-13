@@ -90,7 +90,7 @@ Sources from the scoping note are classified into three tiers based on current i
 
 **Granularity:** 6-digit HS code, annual, bilateral (reporter × partner).
 
-**Years covered:** 2021–2024 (configurable in `config.py` → `YEARS`).
+**Years covered:** 2021–2025 (configurable in `config.py` → `YEARS`). Requested directly per year; a given year can return empty if a reporter hasn't submitted data to Comtrade yet.
 
 ---
 
@@ -101,7 +101,7 @@ Sources from the scoping note are classified into three tiers based on current i
 | **Provider** | World Bank |
 | **API** | Yes — REST `https://api.worldbank.org/v2` |
 | **Access** | No key required |
-| **Rate limits** | Gentle throttling (`time.sleep(0.2)` between countries) |
+| **Rate limits** | Gentle throttling (`time.sleep(0.2)` between countries); 60s request timeout per 20-country batch (raised from 30s — see Known Issues below) |
 | **Licensing** | Open data; attribution required |
 | **Cost** | Free |
 | **Refresh cadence** | Monthly (with ETL) |
@@ -119,7 +119,12 @@ Sources from the scoping note are classified into three tiers based on current i
 
 **Granularity:** Country (ISO-3), annual.
 
-**Storage:** `market_context` table, keyed by ISO-3 `country_code`.
+**Storage:** `market_context` table, keyed by ISO-3 `country_code` — every field keeps its own year here.
+
+**Year resolution on `indicators` (denormalised copy):** `lpi_score`, `regulatory_quality`, and `political_stability` are not published annually without gaps (LPI is triennial, WGI lags 1–2 years), so `_latest_wb_context()` resolves each field *independently* to the latest year ≤ `computed_for_year` with a non-null value. `indicators.lpi_score_year`, `regulatory_quality_year`, and `political_stability_year` (migration 0005) record which year each resolved value actually came from. `gdp_per_capita_usd` has no equivalent `_year` column — it publishes annually with no structural gaps, so a `NULL` there indicates a fetch failure, not a data gap (see Known Issues).
+
+**Known issues:**
+- A 30s per-batch timeout (fixed in migration-adjacent code change, 2026-08-05) was silently dropping `gdp_per_capita_usd` for entire 20-country batches on slow responses — confirmed via `etl_run.log` showing repeated `Read timed out` warnings for `NY.GDP.PCAP.CD` chunks including major economies (China, India, Germany, UK, France, Turkey). Raised to 60s. A stale run predating this fix may still have `NULL` `gdp_per_capita_usd` for affected countries until the ETL is re-run.
 
 ---
 
@@ -145,11 +150,11 @@ with UN numeric country codes):
 | `AHS` | `004` (Afghanistan) | Effectively applied tariff, simple average (preferential where a scheme exists) | First |
 | `MFN` | `000` (World) | Most-Favoured Nation tariff, simple average | Fallback |
 
-**Strategy:** Per market, for each year (descending), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade.
+**Strategy:** Per market, for each year (descending, 2025 → 2021), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade, so the year that actually yields data is often earlier than the latest year requested.
 
 **Granularity:** 6-digit HS code, country (UN numeric code), annual.
 
-**Storage:** Denormalised into `indicators.tariff_rate_pct` and `indicators.tariff_indicator`.
+**Storage:** Denormalised into `indicators.tariff_rate_pct`, `indicators.tariff_indicator`, and `indicators.tariff_year` (migration 0004) — the last one records the actual year WITS reported the stored rate for, since it can differ from the row's `computed_for_year`.
 
 ---
 
@@ -411,11 +416,15 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | **World Bank context (denormalised)** | | | |
 | `gdp_per_capita_usd` | NUMERIC(20,2) | GDP per capita | World Bank |
 | `lpi_score` | NUMERIC(5,3) | Logistics Performance Index | World Bank |
+| `lpi_score_year` | INTEGER | Year `lpi_score` was actually reported for (LPI is triennial — can lag `computed_for_year`) | World Bank |
 | `regulatory_quality` | NUMERIC(6,4) | Regulatory quality estimate | World Bank |
+| `regulatory_quality_year` | INTEGER | Year `regulatory_quality` was actually reported for (WGI lags 1–2 years) | World Bank |
 | `political_stability` | NUMERIC(6,4) | Political stability estimate | World Bank |
+| `political_stability_year` | INTEGER | Year `political_stability` was actually reported for | World Bank |
 | **WITS tariff** | | | |
 | `tariff_rate_pct` | NUMERIC(6,3) | Import tariff rate % | WITS |
 | `tariff_indicator` | TEXT | `'AHS'` (preferential) or `'MFN'` (general) | WITS |
+| `tariff_year` | INTEGER | Year WITS actually reported the rate for (can be earlier than `computed_for_year` — WITS lags) | WITS |
 | **Sub-scores (0–100 each)** | | | |
 | `score_market_size` | NUMERIC(5,2) | Market size dimension score | Computed |
 | `score_market_growth` | NUMERIC(5,2) | Market growth dimension score | Computed |
@@ -454,7 +463,7 @@ ETL execution audit log.
 |---|---|
 | **ETL schedule** | Monthly — 1st of month, 02:00 UTC (GitHub Actions `etl.yml`) |
 | **Manual trigger** | `docker-compose exec backend python -m etl.run` |
-| **Years retained** | 2021–2024 (configurable via `config.YEARS`) |
+| **Years retained** | 2021–2025 (configurable via `config.YEARS`) |
 | **Upsert strategy** | Idempotent — `load.py` upserts on unique keys; re-running ETL replaces existing rows |
 | **Partial runs** | Supported: `--products "Saffron" "Dried Grapes (Raisins)"` |
 | **Skip flags** | `--skip-world-bank`, `--skip-tariffs`, `--dry-run` |
