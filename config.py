@@ -7,7 +7,7 @@ and the opportunity scoring model.
 AFGHANISTAN_CODE = 'AFG'
 AFGHANISTAN_NUMERIC = '4'
 
-YEARS = [2021, 2022, 2023, 2024]
+YEARS = [2021, 2022, 2023, 2024, 2025]
 
 TOP_N_MARKETS = 10
 
@@ -215,19 +215,24 @@ PRODUCTS = {
         'description': 'Walnuts, shelled',
     },
     'Pistachios In-Shell': {
-        'codes': ['080253'],
+        'codes': ['080251'],
         'category': 'Tree Nuts',
         'description': 'Pistachios, in-shell',
     },
     'Pistachios Shelled': {
-        'codes': ['080254'],
+        'codes': ['080252'],
         'category': 'Tree Nuts',
         'description': 'Pistachios, shelled',
     },
     'Pine Nuts': {
-        'codes': ['080290'],
+        # NB: HS2022 (effective 2022-01-01) split pine nuts out of the old
+        # "other nuts n.e.c." bucket into dedicated in-shell/shelled codes.
+        # 080290 is only valid for 2021 (HS2017); 080291/080292 only from
+        # 2022 onward (HS2022). All three are needed to cover the full
+        # YEARS window -- see reference/hs_h5.json and reference/hs_h6.json.
+        'codes': ['080290', '080291', '080292'],
         'category': 'Tree Nuts',
-        'description': 'Other nuts, fresh or dried (incl. pine nuts)',
+        'description': 'Pine nuts, fresh or dried, in-shell or shelled',
     },
 
     # ── Spices & herbs ─────────────────────────────────────────────────────
@@ -237,24 +242,38 @@ PRODUCTS = {
         'description': 'Saffron (stigmas, crushed or ground)',
     },
     'Cumin Seeds': {
-        'codes': ['090920'],
+        'codes': ['090931'],
         'category': 'Spices & Herbs',
         'description': 'Cumin seeds',
     },
     'Fenugreek': {
+        # NB: HS2022 split African cherry bark (Prunus africana) out of this
+        # n.e.c. bucket into its own code (121160) -- unrelated to fenugreek,
+        # so 121190 keeps the same scope for our purposes across revisions.
+        # See reference/hs2017_hs2022_correlation.csv.
         'codes': ['121190'],
         'category': 'Spices & Herbs',
         'description': 'Fenugreek and other plants used in pharmacy/perfumery',
     },
     'Asafoetida': {
-        'codes': ['130219'],
+        'codes': ['130190'],
         'category': 'Spices & Herbs',
         'description': 'Other vegetable saps and extracts (incl. asafoetida/hing)',
     },
     'Liquorice Root': {
-        'codes': ['121110'],
+        # NB: the dedicated liquorice-root code (121110) is valid but almost
+        # never used by reporters (2 global records across 2021-2024).
+        # Real root trade is reported under this broader "other plants n.e.c."
+        # catch-all instead, alongside unrelated goods (ginseng, coca leaf,
+        # poppy straw, ephedra). See README for details.
+        'codes': ['121190'],
         'category': 'Spices & Herbs',
         'description': 'Liquorice roots',
+    },
+    'Liquorice Extract': {
+        'codes': ['130212'],
+        'category': 'Spices & Herbs',
+        'description': 'Liquorice extract',
     },
 
     # ── Dried fruits ───────────────────────────────────────────────────────
@@ -274,14 +293,27 @@ PRODUCTS = {
         'description': 'Dried figs',
     },
     'Dried Pomegranate': {
-        'codes': ['081390'],
+        'codes': ['081340'],
         'category': 'Dried Fruits',
+        # NB: pomegranate has no dedicated HS6 code -- this is the catch-all
+        # "other dried fruit, n.e.c." bucket, so figures include unrelated
+        # minor dried fruits alongside pomegranate. See README for details.
         'description': 'Other dried fruits (incl. dried pomegranate)',
     },
-    'Dried Mulberries': {
-        'codes': ['081320'],
-        'category': 'Dried Fruits',
-        'description': 'Dried prunes and mulberries',
+    # NB: no dedicated "dried mulberries" code exists anywhere in the HS
+    # classification -- mulberries only appear combined with raspberries/
+    # blackberries/loganberries under fresh (081020) or cooked/frozen (081120)
+    # headings, never in the dried-fruit chapter. Tracked as two separate
+    # products below rather than one "Dried Mulberries" entry. See README.
+    'Mulberries (Fresh)': {
+        'codes': ['081020'],
+        'category': 'Fresh Fruits',
+        'description': 'Raspberries, blackberries, mulberries and loganberries, fresh',
+    },
+    'Mulberries (Prepared/Frozen)': {
+        'codes': ['081120'],
+        'category': 'Fresh Fruits',
+        'description': 'Raspberries, blackberries, mulberries etc., uncooked or cooked, frozen',
     },
 
     # ── Fresh fruits ───────────────────────────────────────────────────────
@@ -291,14 +323,22 @@ PRODUCTS = {
         'description': 'Fresh grapes',
     },
     'Fresh Pomegranate': {
-        'codes': ['081080'],
+        'codes': ['081090'],
         'category': 'Fresh Fruits',
+        # NB: pomegranate has no dedicated HS6 code -- this is the catch-all
+        # "other fresh fruit, n.e.c." bucket, so figures include unrelated
+        # minor fresh fruits alongside pomegranate. See README for details.
         'description': 'Other fresh fruit (incl. pomegranate)',
     },
-    'Melons': {
-        'codes': ['080790'],
+    'Watermelons': {
+        'codes': ['080711'],
         'category': 'Fresh Fruits',
-        'description': 'Other melons (fresh)',
+        'description': 'Watermelons (fresh)',
+    },
+    'Melons': {
+        'codes': ['080719'],
+        'category': 'Fresh Fruits',
+        'description': 'Melons, other than watermelons (fresh)',
     },
     'Apricots': {
         'codes': ['080910'],
@@ -312,15 +352,14 @@ PRODUCTS = {
         'category': 'Carpets & Textiles',
         'description': 'Knotted carpets of wool or fine animal hair (hand-made)',
     },
+    # NB: kilims have no dedicated HS6 code of their own -- Comtrade's 570210
+    # ("woven, not tufted or flocked" carpets) explicitly names kelim/kilim
+    # rugs as part of this same category, so they're not tracked as a
+    # separate product. See README.
     'Woven Carpets': {
         'codes': ['570210'],
         'category': 'Carpets & Textiles',
-        'description': 'Woven carpets of wool or fine animal hair (hand-made)',
-    },
-    'Kilims': {
-        'codes': ['570391'],
-        'category': 'Carpets & Textiles',
-        'description': 'Kelim, sumak, karamanie and similar flat-woven rugs',
+        'description': 'Woven carpets of wool or fine animal hair (hand-made), incl. kelim/kilim rugs',
     },
 
     # ── Luxury fibres ──────────────────────────────────────────────────────
@@ -330,9 +369,9 @@ PRODUCTS = {
         'description': 'Cashmere (Kashmir goat hair), not carded or combed',
     },
     'Processed Cashmere': {
-        'codes': ['510212'],
+        'codes': ['510531'],
         'category': 'Luxury Fibres',
-        'description': 'Cashmere (Kashmir goat hair), carded or combed',
+        'description': 'Wool and fine or coarse animal hair, carded or combed (including combed wool in fragments, Kashmir goat hair)',
     },
     'Cashmere Sweaters': {
         'codes': ['611012'],
@@ -346,15 +385,33 @@ PRODUCTS = {
     },
 
     # ── Minerals & stones ──────────────────────────────────────────────────
-    'Lapis Lazuli': {
-        'codes': ['711299'],
+    # Lapis lazuli has no HS6 code of its own -- it falls under these three
+    # broader precious/semi-precious stone categories depending on processing
+    # stage. Tracked as three separate products. See README.
+    'Lapis Lazuli (Unworked)': {
+        'codes': ['710310'],
         'category': 'Minerals & Stones',
-        'description': 'Precious/semi-precious stones (incl. lapis lazuli), unworked',
+        'description': 'Precious/semi-precious stones (incl. lapis lazuli), unworked or simply sawn/roughly shaped',
     },
-    'Marble & Travertine': {
-        'codes': ['251621'],
+    'Lapis Lazuli (Worked)': {
+        'codes': ['710399'],
         'category': 'Minerals & Stones',
-        'description': 'Marble and travertine, crude or rough',
+        'description': 'Precious/semi-precious stones (incl. lapis lazuli), worked, not strung/mounted/set',
+    },
+    'Lapis Lazuli (Articles)': {
+        'codes': ['711620'],
+        'category': 'Minerals & Stones',
+        'description': 'Articles of precious/semi-precious stones (incl. lapis lazuli)',
+    },
+    'Marble & Travertine (Crude)': {
+        'codes': ['251511'],
+        'category': 'Minerals & Stones',
+        'description': 'Marble and travertine, crude or roughly trimmed',
+    },
+    'Marble & Travertine (Cut)': {
+        'codes': ['251512'],
+        'category': 'Minerals & Stones',
+        'description': 'Marble and travertine, merely cut into blocks or slabs',
     },
     'Talc': {
         'codes': ['252620'],
