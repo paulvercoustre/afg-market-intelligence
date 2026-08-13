@@ -133,10 +133,14 @@ def create_tables():
                 language_similarity REAL,
                 gdp_per_capita_usd REAL,
                 lpi_score REAL,
+                lpi_score_year INTEGER,
                 regulatory_quality REAL,
+                regulatory_quality_year INTEGER,
                 political_stability REAL,
+                political_stability_year INTEGER,
                 tariff_rate_pct REAL,
                 tariff_indicator TEXT,
+                tariff_year INTEGER,
                 score_market_size REAL,
                 score_market_growth REAL,
                 score_market_quality REAL,
@@ -191,8 +195,10 @@ def seeded_db():
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
                 opportunity_score, distance_km, has_fta, language_similarity,
-                gdp_per_capita_usd, lpi_score, regulatory_quality, political_stability,
-                tariff_rate_pct, tariff_indicator,
+                gdp_per_capita_usd, lpi_score, lpi_score_year,
+                regulatory_quality, regulatory_quality_year,
+                political_stability, political_stability_year,
+                tariff_rate_pct, tariff_indicator, tariff_year,
                 score_market_size, score_market_growth, score_market_quality,
                 score_price_competitiveness, score_afg_foothold,
                 score_distance, score_language, score_fta, score_tariff
@@ -204,8 +210,10 @@ def seeded_db():
                 10.5, 8.2, 200000, 15.4,
                 2021, 2024, 'Competitive',
                 72.5, 1000, 0, 0.2,
-                2200, 3.5, 0.8, 0.5,
-                30.0, 'AHS',
+                2200, 3.5, 2022,
+                0.8, 2024,
+                0.5, 2024,
+                30.0, 'AHS', 2022,
                 65.0, 60.0, 70.0, 75.0, 45.0, 93.0, 20.0, 0.0, 10.0
             FROM products p WHERE p.name = 'Saffron'
         """))
@@ -421,9 +429,10 @@ class TestDiscovery:
         markets = r.json()["markets"]
         assert len(markets) > 0
         ctx = markets[0]["context"]
-        for key in ("gdp_per_capita_usd", "lpi_score",
-                    "regulatory_quality", "political_stability",
-                    "tariff_rate_pct", "tariff_indicator"):
+        for key in ("gdp_per_capita_usd", "lpi_score", "lpi_score_year",
+                    "regulatory_quality", "regulatory_quality_year",
+                    "political_stability", "political_stability_year",
+                    "tariff_rate_pct", "tariff_indicator", "tariff_year"):
             assert key in ctx
 
     def test_market_row_has_tariff(self, client, seeded_db):
@@ -434,6 +443,14 @@ class TestDiscovery:
         assert india is not None
         assert india["tariff_rate_pct"] == 30.0
         assert india["context"]["tariff_indicator"] == "AHS"
+        # Seeded with computed_for_year=2024 but tariff_year=2022 -- WITS
+        # lag means the rate can be older than the indicator row itself.
+        assert india["context"]["tariff_year"] == 2022
+        # Same idea for World Bank fields: seeded with lpi_score_year=2022
+        # (older, triennial survey) vs. regulatory/political _year=2024.
+        assert india["context"]["lpi_score_year"] == 2022
+        assert india["context"]["regulatory_quality_year"] == 2024
+        assert india["context"]["political_stability_year"] == 2024
 
     def test_high_tariff_market_gets_low_tariff_score(self, client, seeded_db):
         r = client.get("/api/discover/091020")

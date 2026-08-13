@@ -32,8 +32,10 @@ class TestResolveCountryName:
         assert resolve_country_name("4", None) == "Afghanistan"
         assert resolve_country_name("004", None) == "Afghanistan"
 
-    def test_unknown_code_returns_none(self):
-        assert resolve_country_name("99999", None) is None
+    def test_unknown_code_falls_back_to_placeholder(self):
+        assert resolve_country_name("99999", None) == "Unknown (99999)"
+
+    def test_empty_code_returns_none(self):
         assert resolve_country_name("", None) is None
         assert resolve_country_name(None, None) is None
 

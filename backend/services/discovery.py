@@ -48,6 +48,7 @@ def get_ranked_markets(
             i.language_similarity,
             i.tariff_rate_pct,
             i.tariff_indicator,
+            i.tariff_year,
             i.score_market_size,
             i.score_market_growth,
             i.score_market_quality,
@@ -59,8 +60,11 @@ def get_ranked_markets(
             i.score_tariff,
             i.gdp_per_capita_usd,
             i.lpi_score,
+            i.lpi_score_year,
             i.regulatory_quality,
-            i.political_stability
+            i.regulatory_quality_year,
+            i.political_stability,
+            i.political_stability_year
         FROM indicators i
         LEFT JOIN markets m ON m.country_code = i.market_code
         WHERE i.product_id = :product_id
@@ -106,10 +110,14 @@ def get_ranked_markets(
             "context": {
                 "gdp_per_capita_usd": _f(r["gdp_per_capita_usd"]),
                 "lpi_score": _f(r["lpi_score"]),
+                "lpi_score_year": r["lpi_score_year"],
                 "regulatory_quality": _f(r["regulatory_quality"]),
+                "regulatory_quality_year": r["regulatory_quality_year"],
                 "political_stability": _f(r["political_stability"]),
+                "political_stability_year": r["political_stability_year"],
                 "tariff_rate_pct": _f(r["tariff_rate_pct"]),
                 "tariff_indicator": r["tariff_indicator"],
+                "tariff_year": r["tariff_year"],
             },
         })
 
@@ -200,10 +208,14 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         "context": {
             "gdp_per_capita_usd": _f(row["gdp_per_capita_usd"]),
             "lpi_score": _f(row["lpi_score"]),
+            "lpi_score_year": row["lpi_score_year"],
             "regulatory_quality": _f(row["regulatory_quality"]),
+            "regulatory_quality_year": row["regulatory_quality_year"],
             "political_stability": _f(row["political_stability"]),
+            "political_stability_year": row["political_stability_year"],
             "tariff_rate_pct": _f(row["tariff_rate_pct"]),
             "tariff_indicator": row["tariff_indicator"],
+            "tariff_year": row["tariff_year"],
         },
         "trade": {
             "market_code": market_code,

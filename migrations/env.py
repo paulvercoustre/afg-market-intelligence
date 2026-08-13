@@ -10,7 +10,14 @@ load_dotenv()
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: fileConfig()'s default (True) silently
+    # disables every logger not explicitly listed in alembic.ini's [loggers]
+    # section (only root/sqlalchemy/alembic are). Harmless when alembic runs
+    # as its own CLI process, but when migrations run programmatically inside
+    # a longer-lived process -- e.g. a test session that also calls
+    # etl.run.main() -- this permanently silences that process's own loggers
+    # (etl.run, etl.fetch, ...) for the rest of its lifetime.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Override sqlalchemy.url from environment
 database_url = os.environ.get("DATABASE_URL")

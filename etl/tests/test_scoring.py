@@ -74,9 +74,23 @@ class TestLatestWbContext:
         assert ctx["gdp_per_capita_usd"] == 2592.0  # newest wins
         assert ctx["lpi_score"] == 3.4              # falls back to 2022
 
+    def test_records_which_year_each_field_came_from(self):
+        # Same fixture as above: gdp_per_capita_usd resolves to the newer
+        # 2024 row, lpi_score falls back to 2022 -- each field's '_year'
+        # entry must reflect its own source year, not a single shared one.
+        ctx_by_year = {
+            2022: {"gdp_per_capita_usd": 2280.0, "lpi_score": 3.4},
+            2024: {"gdp_per_capita_usd": 2592.0, "lpi_score": None},
+        }
+        ctx = _latest_wb_context(ctx_by_year, 2024)
+        assert ctx["gdp_per_capita_usd_year"] == 2024
+        assert ctx["lpi_score_year"] == 2022
+
     def test_ignores_years_after_cutoff(self):
         ctx_by_year = {2023: {"lpi_score": 3.0}, 2025: {"lpi_score": 4.0}}
-        assert _latest_wb_context(ctx_by_year, 2024) == {"lpi_score": 3.0}
+        ctx = _latest_wb_context(ctx_by_year, 2024)
+        assert ctx["lpi_score"] == 3.0
+        assert ctx["lpi_score_year"] == 2023
 
     def test_empty(self):
         assert _latest_wb_context({}, 2024) == {}
@@ -88,7 +102,7 @@ class TestEnrichIndicatorsWithScores:
             [sample_indicator_row.copy()],
             market_context={"699": {2024: {"lpi_score": 3.5, "regulatory_quality": 0.5}}},
             all_market_sizes={"699": 10_000_000},
-            tariffs={"699": {"rate": 5.0, "indicator": "MFN"}},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
         )
         row = rows[0]
         score_keys = [
@@ -99,6 +113,29 @@ class TestEnrichIndicatorsWithScores:
         for key in score_keys:
             assert key in row
             assert 0 <= row[key] <= 100
+        # The year the rate was actually reported for (can differ from
+        # computed_for_year when WITS lags) must be carried through.
+        assert row["tariff_year"] == 2022
+
+    def test_wb_field_years_are_carried_through(self, sample_indicator_row):
+        # market_context here has both years present for lpi_score (2022)
+        # and regulatory_quality (2024) -- each should keep its own year,
+        # same idea as tariff_year but for World Bank fields.
+        rows = enrich_indicators_with_scores(
+            [sample_indicator_row.copy()],
+            market_context={"699": {
+                2022: {"lpi_score": 3.4},
+                2024: {"regulatory_quality": 0.5, "political_stability": -0.2},
+            }},
+            all_market_sizes={"699": 10_000_000},
+        )
+        row = rows[0]
+        assert row["lpi_score"] == 3.4
+        assert row["lpi_score_year"] == 2022
+        assert row["regulatory_quality"] == 0.5
+        assert row["regulatory_quality_year"] == 2024
+        assert row["political_stability"] == -0.2
+        assert row["political_stability_year"] == 2024
 
     def test_composite_equals_weighted_sum(self, sample_indicator_row):
         row = sample_indicator_row.copy()
@@ -133,7 +170,11 @@ class TestEnrichIndicatorsWithScores:
         assert row["score_market_quality"] == pytest.approx(50.0)
         assert row["score_tariff"] == pytest.approx(50.0)
         assert row["gdp_per_capita_usd"] is None
+        assert row["lpi_score_year"] is None
+        assert row["regulatory_quality_year"] is None
+        assert row["political_stability_year"] is None
         assert row["tariff_rate_pct"] is None
+        assert row["tariff_year"] is None
 
     def test_fta_bonus_applied(self, sample_indicator_row):
         # India (699) has partial FTA in config

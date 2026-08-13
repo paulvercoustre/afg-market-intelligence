@@ -199,6 +199,22 @@ def _sum_year(df: pd.DataFrame, col: str, year: int) -> float | None:
     return float(total) if total > 0 else None
 
 
+
+# indicators.{yoy_growth_pct,cagr_pct,growth_pct} are NUMERIC(10,4) -- a growth
+# rate off a near-zero prior-year base can produce a percentage in the
+# millions, which overflows that column and (since these rows are upserted in
+# a single multi-row INSERT) fails the whole product's batch. Such a number
+# isn't meaningful growth data anyway, so treat it as undefined rather than
+# storing a nonsensical figure.
+_MAX_PCT_MAGNITUDE = 999_999.0
+
+
+def _safe_pct(value: float | None) -> float | None:
+    if value is None or math.isnan(value) or math.isinf(value):
+        return None
+    return value if abs(value) <= _MAX_PCT_MAGNITUDE else None
+
+
 def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
     empty = {"yoy": None, "cagr": None, "absolute": None, "pct": None,
              "first_year": None, "last_year": None}
@@ -232,8 +248,8 @@ def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
     pct = (absolute / first_val * 100) if first_val > 0 else None
 
     return {
-        "yoy": yoy, "cagr": cagr, "absolute": absolute, "pct": pct,
-        "first_year": first_year, "last_year": last_year,
+        "yoy": _safe_pct(yoy), "cagr": _safe_pct(cagr), "absolute": absolute,
+        "pct": _safe_pct(pct), "first_year": first_year, "last_year": last_year,
     }
 
 
@@ -358,14 +374,18 @@ def enrich_indicators_with_scores(
         ctx = _latest_wb_context(ctx_by_year, year)
         row["gdp_per_capita_usd"] = ctx.get("gdp_per_capita_usd")
         row["lpi_score"] = ctx.get("lpi_score")
+        row["lpi_score_year"] = ctx.get("lpi_score_year")
         row["regulatory_quality"] = ctx.get("regulatory_quality")
+        row["regulatory_quality_year"] = ctx.get("regulatory_quality_year")
         row["political_stability"] = ctx.get("political_stability")
+        row["political_stability_year"] = ctx.get("political_stability_year")
 
         # ── Tariff (WITS) ─────────────────────────────────────────────────────
         tariff_info = tariffs.get(mc) or {}
         tariff_rate = tariff_info.get("rate")
         row["tariff_rate_pct"] = tariff_rate
         row["tariff_indicator"] = tariff_info.get("indicator")
+        row["tariff_year"] = tariff_info.get("year")
 
         # ── Dimension scores (0–100) ─────────────────────────────────────────
         s_size = _score_market_size(row.get("global_market_size_usd"), log_max)
@@ -411,6 +431,11 @@ def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
     Fields are resolved independently because indicators refresh on different
     cycles — e.g. the LPI survey is triennial, so the latest year's record may
     have GDP but a null LPI while an earlier year has the survey value.
+
+    Also returns a '{field}_year' entry alongside each resolved field, giving
+    the actual year that value came from -- without it, a caller can't tell a
+    fresh value from one that's several years stale (the same problem
+    tariff_year solves for WITS rates).
     """
     eligible_years = sorted((yr for yr in ctx_by_year if yr <= up_to_year), reverse=True)
     merged: dict = {}
@@ -418,6 +443,7 @@ def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
         for field, value in ctx_by_year[yr].items():
             if value is not None and field not in merged:
                 merged[field] = value
+                merged[f"{field}_year"] = yr
     return merged
 
 

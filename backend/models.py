@@ -115,12 +115,16 @@ class Indicator(Base):
     # World Bank context (denormalised for query efficiency)
     gdp_per_capita_usd = Column(Numeric(20, 2))
     lpi_score = Column(Numeric(5, 3))
+    lpi_score_year = Column(Integer)  # year lpi_score was actually reported for -- LPI is triennial
     regulatory_quality = Column(Numeric(6, 4))
+    regulatory_quality_year = Column(Integer)  # WGI lags 1-2 years behind computed_for_year
     political_stability = Column(Numeric(6, 4))
+    political_stability_year = Column(Integer)
 
     # WITS tariff data
     tariff_rate_pct = Column(Numeric(6, 3))
     tariff_indicator = Column(Text)  # 'AHS' (preferential) or 'MFN' (general)
+    tariff_year = Column(Integer)  # year the rate was actually reported for -- can be earlier than computed_for_year, WITS lags
 
     # Sub-scores (0–100 each)
     score_market_size = Column(Numeric(5, 2))

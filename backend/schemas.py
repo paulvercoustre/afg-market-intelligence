@@ -141,10 +141,14 @@ class ScoreBreakdown(BaseModel):
 class MarketContextData(BaseModel):
     gdp_per_capita_usd: float | None
     lpi_score: float | None
+    lpi_score_year: int | None = None
     regulatory_quality: float | None
+    regulatory_quality_year: int | None = None
     political_stability: float | None
+    political_stability_year: int | None = None
     tariff_rate_pct: float | None = None
     tariff_indicator: str | None = None
+    tariff_year: int | None = None
 
 
 class MarketOpportunity(BaseModel):

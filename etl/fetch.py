@@ -10,6 +10,7 @@ Comtrade improvements over the original client:
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import certifi
 import comtradeapicall
@@ -61,6 +62,22 @@ def _call_comtrade(
     flow_code: 'M' = imports, 'X' = exports
     reporter_code: None → all reporters
     partner_code: None → all partners
+
+    partner2Code, customsCode and motCode are all pinned to their "TOTAL"
+    sentinel rather than left as None. Comtrade breaks a trade flow out along
+    several optional dimensions -- secondary partner (re-export/transshipment),
+    customs procedure, and mode of transport (sea/air/land) among them -- and
+    for each one, a pre-aggregated "TOTAL" row (partner2Code='0', motCode='0',
+    customsCode='C00') coexists with breakdown rows that sum up to it. Leaving
+    any of them as None returns *all* rows for that dimension together, and
+    nothing downstream deduplicates or sums them correctly: summing every row
+    naively double-counts (aggregate + its own components), while a plain
+    per-(reporter,partner,year) upsert with ON CONFLICT DO UPDATE just keeps
+    whichever breakdown row happened to load last -- an arbitrary fragment,
+    not the total. Pinning all three to their TOTAL value selects only the
+    single pre-aggregated total, which is also what standard trade dashboards
+    (Comtrade's own DataViz, ITC Trade Map, WITS) report as "the" bilateral
+    trade value.
     """
     api_key = _get_api_key()
     response = comtradeapicall.getFinalData(
@@ -73,9 +90,9 @@ def _call_comtrade(
         cmdCode=hs_code,
         flowCode=flow_code,
         partnerCode=partner_code,
-        partner2Code=None,
-        customsCode=None,
-        motCode=None,
+        partner2Code="0",
+        customsCode="C00",
+        motCode="0",
     )
     time.sleep(_API_DELAY)
 
@@ -91,7 +108,7 @@ def _call_comtrade(
 @retry(
     retry=retry_if_exception_type((ComtradeRateLimitError, ConnectionError, TimeoutError)),
     wait=wait_exponential(multiplier=1, min=2, max=16),
-    stop=stop_after_attempt(4),
+    stop=stop_after_attempt(2),
     reraise=True,
 )
 def fetch_mirror_exports(hs_code: str, years: list[int]) -> pd.DataFrame:
@@ -126,7 +143,7 @@ def fetch_mirror_exports(hs_code: str, years: list[int]) -> pd.DataFrame:
 @retry(
     retry=retry_if_exception_type((ComtradeRateLimitError, ConnectionError, TimeoutError)),
     wait=wait_exponential(multiplier=1, min=2, max=16),
-    stop=stop_after_attempt(4),
+    stop=stop_after_attempt(2),
     reraise=True,
 )
 def fetch_global_imports(hs_code: str, years: list[int]) -> pd.DataFrame:
@@ -188,18 +205,41 @@ _WB_SESSION = requests.Session()
 _WB_SESSION.verify = certifi.where()
 
 
+# Max countries per batched WB request. The API accepts semicolon-separated
+# country codes in the URL path; keeping chunks modest avoids overly long
+# URLs and keeps per_page comfortably above chunk_size * len(years) rows.
+_WB_CHUNK_SIZE = 20
+
+
+def _chunk(items: list[str], size: int) -> list[list[str]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 @retry(
     retry=retry_if_exception_type((ConnectionError, TimeoutError, requests.RequestException)),
     wait=wait_exponential(multiplier=1, min=2, max=16),
     stop=stop_after_attempt(4),
     reraise=True,
 )
-def _fetch_wb_indicator(country_code: str, indicator_code: str, years: list[int]) -> dict[int, float]:
-    """Fetch a single World Bank indicator for one country across multiple years."""
+def _fetch_wb_indicator_chunk(country_codes: list[str], indicator_code: str,
+                              years: list[int]) -> dict[str, dict[int, float]]:
+    """
+    Fetch one World Bank indicator for a batch of countries in a single call.
+
+    Timeout is 60s, not the 30s a single indicator lookup might suggest: a
+    chunk of _WB_CHUNK_SIZE (20) countries x up to 5 years is ~100 data
+    points in one response, and a 30s timeout was observed to fail on the
+    live API for exactly this shape of request (confirmed via etl_run.log:
+    two 20-country chunks of NY.GDP.PCAP.CD timed out and exhausted all 4
+    retries, silently leaving ~40 major economies -- including China, India,
+    Germany -- with NULL gdp_per_capita_usd for every requested year). This
+    is the same class of fix as the WITS 20s->90s timeout correction below.
+    """
     year_range = f"{min(years)}:{max(years)}"
-    url = f"{_WB_BASE}/country/{country_code}/indicator/{indicator_code}"
-    params = {"format": "json", "date": year_range, "per_page": 100}
-    resp = _WB_SESSION.get(url, params=params, timeout=30)
+    countries = ";".join(country_codes)
+    url = f"{_WB_BASE}/country/{countries}/indicator/{indicator_code}"
+    params = {"format": "json", "date": year_range, "per_page": 2000}
+    resp = _WB_SESSION.get(url, params=params, timeout=60)
     resp.raise_for_status()
 
     data = resp.json()
@@ -211,13 +251,14 @@ def _fetch_wb_indicator(country_code: str, indicator_code: str, years: list[int]
     if not isinstance(data, list) or len(data) < 2:
         return {}
 
-    result: dict[int, float] = {}
+    result: dict[str, dict[int, float]] = {}
     for entry in data[1] or []:
+        iso3 = (entry.get("countryiso3code") or "").upper()
         yr_str = entry.get("date")
         value = entry.get("value")
-        if yr_str and value is not None:
+        if iso3 and yr_str and value is not None:
             try:
-                result[int(yr_str)] = float(value)
+                result.setdefault(iso3, {})[int(yr_str)] = float(value)
             except (ValueError, TypeError):
                 pass
     return result
@@ -229,34 +270,40 @@ def fetch_world_bank_indicators(country_codes: list[str], years: list[int]) -> l
 
     country_codes: ISO-3 alpha codes (e.g. ['IND', 'PAK', 'DEU'])
     Returns a list of dicts mapping to the market_context DB table.
+
+    Batches countries into groups of _WB_CHUNK_SIZE per indicator call (the
+    WB API accepts semicolon-separated country codes) instead of one request
+    per country per indicator. For 70 countries x 5 indicators that's ~20
+    requests instead of 350 -- far less exposure to slow/unresponsive calls.
     """
+    # field -> iso3 -> year -> value
+    per_indicator: dict[str, dict[str, dict[int, float]]] = {f: {} for f in _WB_INDICATORS}
+
+    for field, wb_code in _WB_INDICATORS.items():
+        for chunk in _chunk(country_codes, _WB_CHUNK_SIZE):
+            try:
+                chunk_result = _fetch_wb_indicator_chunk(chunk, wb_code, years)
+                per_indicator[field].update(chunk_result)
+            except Exception as exc:
+                logger.warning(f"World Bank {wb_code} failed for chunk {chunk}: {exc}")
+            time.sleep(0.2)  # gentle rate-limit respect
+
     rows = []
     for iso3 in country_codes:
-        per_indicator: dict[str, dict[int, float]] = {}
-        for field, wb_code in _WB_INDICATORS.items():
-            try:
-                per_indicator[field] = _fetch_wb_indicator(iso3, wb_code, years)
-            except Exception as exc:
-                logger.warning(f"World Bank {wb_code} failed for {iso3}: {exc}")
-                per_indicator[field] = {}
-
-        # Collect all years that have at least one value
         all_years = set()
-        for year_map in per_indicator.values():
-            all_years.update(year_map.keys())
+        for field_data in per_indicator.values():
+            all_years.update(field_data.get(iso3, {}).keys())
 
         for yr in sorted(all_years):
             rows.append({
                 "country_code": iso3,
                 "year": yr,
-                "gdp_usd": per_indicator["gdp_usd"].get(yr),
-                "gdp_per_capita_usd": per_indicator["gdp_per_capita_usd"].get(yr),
-                "lpi_score": per_indicator["lpi_score"].get(yr),
-                "regulatory_quality": per_indicator["regulatory_quality"].get(yr),
-                "political_stability": per_indicator["political_stability"].get(yr),
+                "gdp_usd": per_indicator["gdp_usd"].get(iso3, {}).get(yr),
+                "gdp_per_capita_usd": per_indicator["gdp_per_capita_usd"].get(iso3, {}).get(yr),
+                "lpi_score": per_indicator["lpi_score"].get(iso3, {}).get(yr),
+                "regulatory_quality": per_indicator["regulatory_quality"].get(iso3, {}).get(yr),
+                "political_stability": per_indicator["political_stability"].get(iso3, {}).get(yr),
             })
-
-        time.sleep(0.2)  # gentle rate-limit respect
 
     logger.info(f"World Bank fetch complete: {len(rows)} rows for {len(country_codes)} countries")
     return rows
@@ -280,6 +327,17 @@ _WITS_BASE = "https://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN"
 
 _WITS_SESSION = requests.Session()
 _WITS_SESSION.verify = certifi.where()
+# requests.Session defaults to a 10-connection pool per host. Products run
+# concurrently (see _PRODUCT_MAX_WORKERS in etl/run.py) and each spins up its
+# own _TARIFF_MAX_WORKERS threads against this one shared session, so peak
+# concurrent WITS requests can reach _PRODUCT_MAX_WORKERS * _TARIFF_MAX_WORKERS.
+# A pool smaller than that forces the excess requests to open a fresh
+# connection (full TCP+TLS handshake) instead of reusing one, adding avoidable
+# latency on top of WITS's already-slow responses.
+_WITS_SESSION.mount(
+    "https://",
+    requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=30),
+)
 
 _WITS_AFG_PARTNER = "004"
 _WITS_WORLD_PARTNER = "000"
@@ -308,12 +366,23 @@ def _fetch_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, flo
     Fetch the full tariff schedule one reporter applies to one partner in one year.
     Returns {hs6_code: simple_average_rate_pct}; {} when the combination was
     never reported (HTTP 404 — normal, e.g. no preferential scheme for AFG).
+
+    Timeout is 90s, not the ~1s one might expect from a single lookup: this
+    endpoint returns the *entire* product=all tariff schedule for the
+    (reporter, partner, year) in one response, and measured against the live
+    API this genuinely takes 30-60s end-to-end (confirmed for both 200 and
+    404 responses) -- it is not a network hang. A prior version of this
+    function set the timeout to 20s on the assumption that successful calls
+    return in under a second; that assumption was wrong and made every real
+    call fail before completing, which is why tariff data silently stopped
+    coming back (the caller in etl/run.py catches the resulting timeout and
+    continues without tariff scores).
     """
     url = (
         f"{_WITS_BASE}/reporter/{reporter}/partner/{partner}"
         f"/product/all/year/{year}/datatype/reported"
     )
-    resp = _WITS_SESSION.get(url, params={"format": "JSON"}, timeout=180)
+    resp = _WITS_SESSION.get(url, params={"format": "JSON"}, timeout=90)
     if resp.status_code == 404:
         return {}
     resp.raise_for_status()
@@ -394,6 +463,46 @@ def _cached_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, fl
     return _wits_cache[key]
 
 
+# Concurrent market lookups for the WITS step: it can't batch multiple
+# reporters into one request (comma-separated reporters get HTTP 400), and
+# with 160+ markets a fully serial loop is at the mercy of every individual
+# call's timeout. A small thread pool lets slow/stuck calls overlap instead
+# of blocking everything behind them.
+_TARIFF_MAX_WORKERS = 8
+
+
+def _tariff_rows_for_market(market_code: str, hs_set: set[str], years_desc: list[int]) -> list[dict]:
+    reporter = _COMTRADE_TO_WITS_NUMERIC.get(market_code, market_code).zfill(3)
+
+    found: dict[str, float] = {}
+    indicator_used = None
+    for year in years_desc:
+        ahs = _cached_wits_tariffs(reporter, _WITS_AFG_PARTNER, year)
+        found = {hs: ahs[hs] for hs in hs_set if hs in ahs}
+        if found:
+            indicator_used = "AHS"
+        else:
+            mfn = _cached_wits_tariffs(reporter, _WITS_WORLD_PARTNER, year)
+            found = {hs: mfn[hs] for hs in hs_set if hs in mfn}
+            if found:
+                indicator_used = "MFN"
+        if found:
+            if year < years_desc[0]:
+                logger.debug(f"WITS: using {year} data for market {market_code}")
+            break
+
+    return [
+        {
+            "market_code": market_code,
+            "hs_code": hs,
+            "tariff_rate_pct": float(rate),
+            "indicator": indicator_used,
+            "year": year,
+        }
+        for hs, rate in found.items()
+    ]
+
+
 def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
                        years: list[int]) -> list[dict]:
     """
@@ -404,42 +513,35 @@ def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
     are preferred, falling back to MFN rates (partner=000).
 
     Downloads are cached per (reporter, partner, year) covering all products,
-    so subsequent calls for other products reuse them.
+    so subsequent calls for other products reuse them. Markets are looked up
+    concurrently (see _TARIFF_MAX_WORKERS) with progress logged periodically.
 
     Returns list of dicts:
-      {market_code: str, hs_code: str, tariff_rate_pct: float, indicator: 'AHS'|'MFN'}
+      {market_code: str, hs_code: str, tariff_rate_pct: float,
+       indicator: 'AHS'|'MFN', year: int}
+    'year' is the actual year the rate was reported for, which is frequently
+    earlier than the latest year requested (WITS lag) -- callers should not
+    assume it matches whatever year the resulting indicator row is computed for.
     """
     hs_set = {h.replace(".", "") for h in hs_codes}
     years_desc = sorted(years, reverse=True)
 
     rows = []
-    for market_code in market_codes:
-        reporter = _COMTRADE_TO_WITS_NUMERIC.get(market_code, market_code).zfill(3)
-
-        found: dict[str, float] = {}
-        indicator_used = None
-        for year in years_desc:
-            ahs = _cached_wits_tariffs(reporter, _WITS_AFG_PARTNER, year)
-            found = {hs: ahs[hs] for hs in hs_set if hs in ahs}
-            if found:
-                indicator_used = "AHS"
-            else:
-                mfn = _cached_wits_tariffs(reporter, _WITS_WORLD_PARTNER, year)
-                found = {hs: mfn[hs] for hs in hs_set if hs in mfn}
-                if found:
-                    indicator_used = "MFN"
-            if found:
-                if year < years_desc[0]:
-                    logger.debug(f"WITS: using {year} data for market {market_code}")
-                break
-
-        for hs, rate in found.items():
-            rows.append({
-                "market_code": market_code,
-                "hs_code": hs,
-                "tariff_rate_pct": float(rate),
-                "indicator": indicator_used,
-            })
+    done = 0
+    with ThreadPoolExecutor(max_workers=_TARIFF_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_tariff_rows_for_market, market_code, hs_set, years_desc): market_code
+            for market_code in market_codes
+        }
+        for future in as_completed(futures):
+            market_code = futures[future]
+            try:
+                rows.extend(future.result())
+            except Exception as exc:
+                logger.warning(f"WITS tariff lookup failed for market {market_code}: {exc}")
+            done += 1
+            if done % 20 == 0 or done == len(market_codes):
+                logger.info(f"  WITS tariffs: {done}/{len(market_codes)} markets processed")
 
     logger.info(f"WITS tariff fetch complete: {len(rows)} rates across {len(market_codes)} markets")
     return rows
