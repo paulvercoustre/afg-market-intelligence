@@ -128,3 +128,32 @@ class TestComputeIndicators:
     def test_computed_for_latest_year(self, mirror_df, global_df):
         rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
         assert rows[0]["computed_for_year"] == max(YEARS)
+
+    def test_trade_data_year_matches_when_current_year_reported(self, mirror_df, global_df):
+        """Normal case: the market has data for the latest year, so trade_data_year == computed_for_year."""
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, YEARS)
+        assert rows[0]["trade_data_year"] == max(YEARS)
+
+    def test_falls_back_to_markets_own_latest_year_when_newest_year_unreported(
+        self, mirror_df, global_df
+    ):
+        """
+        Regression test: fixture data for market 699 only goes up to 2024
+        (see conftest.YEARS). Asking compute_indicators to target a year
+        past that (2025, simulating config.YEARS being extended before this
+        market has reported anything for it) must not leave the trade
+        fields empty -- it should fall back to 699's own latest available
+        year (2024) the same way World Bank fields already do, and record
+        that year in trade_data_year so callers can tell.
+        """
+        years_with_unreported_2025 = [*YEARS, 2025]
+        rows = compute_indicators(PRODUCT_ID, ["699"], mirror_df, global_df, years_with_unreported_2025)
+        row = rows[0]
+
+        assert row["computed_for_year"] == 2025
+        assert row["trade_data_year"] == max(YEARS)  # 2024, the real latest year with data
+        # Trade fields must be populated from the fallback year, not empty.
+        assert row["global_market_size_usd"] is not None
+        assert row["afg_export_value_usd"] is not None
+        assert row["market_share_pct"] == pytest.approx(2.0)  # same as the current-year test
+        assert row["unit_price_usd"] == pytest.approx(10.0)

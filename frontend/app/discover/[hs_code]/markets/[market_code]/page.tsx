@@ -25,6 +25,16 @@ export default async function MarketProfilePage(
   const profile = await getMarketProfile(hs_code, market_code)
   if (!profile) notFound()
 
+  // Trade figures fall back to this market's own most recent reported year
+  // when computed_for_year's data hasn't landed at Comtrade yet -- flag it
+  // whenever that fallback actually kicked in, so a lower score doesn't get
+  // mistaken for a weak market when it's really just a reporting lag.
+  const tradeDataYear = profile.trade?.trade_data_year ?? null
+  const isStaleTradeData =
+    tradeDataYear != null &&
+    profile.computed_for_year != null &&
+    tradeDataYear !== profile.computed_for_year
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Breadcrumb */}
@@ -77,18 +87,29 @@ export default async function MarketProfilePage(
           {/* Trade data */}
           {profile.trade && (
             <Section title="Trade data">
+              {isStaleTradeData && (
+                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-md px-3 py-2 mb-4">
+                  This market&apos;s latest reported trade data is from {tradeDataYear}
+                  {' '}(not {profile.computed_for_year}) — Comtrade hasn&apos;t published its{' '}
+                  {profile.computed_for_year} figures yet, so the numbers and score below
+                  reflect {tradeDataYear}.
+                </p>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <StatCard
                   label="Afghan exports"
                   value={formatUSD(profile.trade.afg_export_value_usd)}
+                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
                   label="Global market size"
                   value={formatUSD(profile.trade.global_market_size_usd)}
+                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
                   label="Afghan market share"
                   value={formatPct(profile.trade.market_share_pct, 2)}
+                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
                   label="CAGR"
@@ -103,6 +124,7 @@ export default async function MarketProfilePage(
                   <StatCard
                     label="Afghan supplier rank"
                     value={`#${profile.trade.afg_supplier_rank}`}
+                    sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                   />
                 )}
               </div>

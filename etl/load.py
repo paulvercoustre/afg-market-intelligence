@@ -152,12 +152,25 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
     """
     Upsert pre-computed indicator rows (including opportunity scores).
     Conflict key: (product_id, market_code, computed_for_year).
+
+    computed_for_year is each market's own latest Comtrade-available year,
+    which can advance between runs (e.g. 2024 -> 2025 once a reporter
+    publishes). Since the conflict key includes that year, a plain upsert
+    would leave the old year's row behind as an orphan instead of replacing
+    it -- so we first delete any existing row for this (product, market)
+    under a different year.
     """
     if not rows:
         return 0
+    delete_stale_sql = text("""
+        DELETE FROM indicators
+        WHERE product_id = :product_id
+          AND market_code = :market_code
+          AND computed_for_year != :computed_for_year
+    """)
     sql = text("""
         INSERT INTO indicators (
-            product_id, market_code, computed_for_year,
+            product_id, market_code, computed_for_year, trade_data_year,
             global_market_size_usd, afg_export_value_usd,
             yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
             first_year, last_year,
@@ -174,7 +187,7 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             score_distance, score_language, score_fta, score_tariff,
             computed_at
         ) VALUES (
-            :product_id, :market_code, :computed_for_year,
+            :product_id, :market_code, :computed_for_year, :trade_data_year,
             :global_market_size_usd, :afg_export_value_usd,
             :yoy_growth_pct, :cagr_pct, :absolute_growth_usd, :growth_pct,
             :first_year, :last_year,
@@ -192,6 +205,7 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             NOW()
         )
         ON CONFLICT (product_id, market_code, computed_for_year) DO UPDATE SET
+            trade_data_year              = EXCLUDED.trade_data_year,
             global_market_size_usd      = EXCLUDED.global_market_size_usd,
             afg_export_value_usd        = EXCLUDED.afg_export_value_usd,
             yoy_growth_pct              = EXCLUDED.yoy_growth_pct,
@@ -232,6 +246,7 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             computed_at                 = NOW()
     """)
     with engine.begin() as conn:
+        conn.execute(delete_stale_sql, rows)
         conn.execute(sql, rows)
     return len(rows)
 

@@ -111,10 +111,20 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                   <MetricRow
                     label="Global imports"
                     value={formatUSD(market.global_market_size_usd)}
+                    staleYear={
+                      market.trade_data_year != null && market.trade_data_year !== result.computed_for_year
+                        ? market.trade_data_year
+                        : undefined
+                    }
                   />
                   <MetricRow
                     label="Afghan exports"
                     value={formatUSD(market.afg_export_value_usd)}
+                    staleYear={
+                      market.trade_data_year != null && market.trade_data_year !== result.computed_for_year
+                        ? market.trade_data_year
+                        : undefined
+                    }
                   />
                   <MetricRow label="CAGR" value={formatPct(market.cagr_pct)} />
                   <MetricRow
@@ -141,11 +151,29 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
   )
 }
 
-function MetricRow({ label, value }: { label: string; value: string }) {
+function MetricRow({
+  label,
+  value,
+  staleYear,
+}: {
+  label: string
+  value: string
+  staleYear?: number
+}) {
   return (
     <div className="flex justify-between gap-2">
       <span className="text-gray-400">{label}</span>
-      <span className="font-medium text-gray-700 tabular-nums">{value}</span>
+      <span className="font-medium text-gray-700 tabular-nums">
+        {value}
+        {staleYear != null && (
+          <span
+            className="text-amber-500 font-normal ml-1"
+            title={`This market's latest reported data is from ${staleYear} -- Comtrade hasn't published a newer year yet.`}
+          >
+            ({staleYear})
+          </span>
+        )}
+      </span>
     </div>
   )
 }

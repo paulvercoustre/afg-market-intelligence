@@ -129,11 +129,20 @@ def compute_indicators(
 
         market_world = world_totals[world_totals["reporterCode"] == market_code].copy()
 
-        # Global market size (latest year)
-        global_market_size = _sum_year(market_world, "primaryValue", latest_year)
+        # Trade fields target this market's own most recent reported year,
+        # at or before latest_year -- falling back the same way
+        # _latest_wb_context() already does for World Bank fields, so a
+        # market whose latest_year submission hasn't landed at Comtrade yet
+        # reuses its own last known year instead of coming back empty (and
+        # dragging the score down for a reason that has nothing to do with
+        # the market's actual attractiveness).
+        trade_data_year = _resolve_trade_year(market_world, afg_to_market, latest_year)
 
-        # Afghanistan's export value to this market (latest year)
-        afg_value_latest = _sum_year(afg_to_market, "trade_value_usd", latest_year)
+        # Global market size (trade_data_year)
+        global_market_size = _sum_year(market_world, "primaryValue", trade_data_year)
+
+        # Afghanistan's export value to this market (trade_data_year)
+        afg_value_latest = _sum_year(afg_to_market, "trade_value_usd", trade_data_year)
 
         # Growth metrics
         growth = _growth_metrics(afg_to_market, years)
@@ -146,20 +155,21 @@ def compute_indicators(
         )
 
         # Afghanistan's rank among all suppliers to this market
-        afg_rank = _afg_rank(global_df, market_code, afg_value_latest, latest_year)
+        afg_rank = _afg_rank(global_df, market_code, afg_value_latest, trade_data_year)
 
         # Unit price
-        unit_price = _unit_price(afg_to_market, latest_year)
+        unit_price = _unit_price(afg_to_market, trade_data_year)
 
         # Market average price and competitiveness
         market_avg_price, price_vs_market_pct, competitiveness = _price_competitiveness(
-            global_df, market_code, unit_price, latest_year
+            global_df, market_code, unit_price, trade_data_year
         )
 
         rows.append({
             "product_id": product_id,
             "market_code": market_code,
             "computed_for_year": latest_year,
+            "trade_data_year": trade_data_year,
             "global_market_size_usd": _float_or_none(global_market_size),
             "afg_export_value_usd": _float_or_none(afg_value_latest),
             "yoy_growth_pct": _float_or_none(growth["yoy"]),
@@ -189,6 +199,25 @@ def _float_or_none(v: Any) -> float | None:
         return None if (np.isnan(f) or np.isinf(f)) else f
     except (TypeError, ValueError):
         return None
+
+
+def _resolve_trade_year(
+    market_world: pd.DataFrame, afg_to_market: pd.DataFrame, up_to_year: int
+) -> int | None:
+    """
+    The most recent year <= up_to_year that this market has *any* reported
+    data for -- its own global-import totals or Afghanistan's exports to it.
+    Comtrade reporters submit a full year's trade lines at once, so "this
+    market's global totals exist for year Y" is a reliable signal that Y is
+    a real reporting year for it, not just a year we happened to ask about.
+    """
+    years_with_data: set[int] = set()
+    if not market_world.empty:
+        years_with_data |= set(pd.to_numeric(market_world["year"], errors="coerce").dropna().astype(int))
+    if not afg_to_market.empty:
+        years_with_data |= set(pd.to_numeric(afg_to_market["year"], errors="coerce").dropna().astype(int))
+    eligible = [y for y in years_with_data if y <= up_to_year]
+    return max(eligible) if eligible else None
 
 
 def _sum_year(df: pd.DataFrame, col: str, year: int) -> float | None:

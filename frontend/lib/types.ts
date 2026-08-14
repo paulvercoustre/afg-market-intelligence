@@ -45,6 +45,7 @@ export interface MarketOpportunity {
   has_fta: boolean | null
   language_similarity: number | null
   tariff_rate_pct: number | null
+  trade_data_year: number | null
   score_breakdown: ScoreBreakdown
   context: MarketContextData
 }
@@ -80,6 +81,7 @@ export interface MarketIndicator {
   global_market_size_usd: number | null
   market_share_pct: number | null
   afg_supplier_rank: number | null
+  trade_data_year: number | null
   growth: GrowthMetrics
   price: PriceMetrics
 }
@@ -104,6 +106,7 @@ export interface MarketProfile {
   product_name: string | null
   market_code: string
   market_name: string | null
+  computed_for_year: number | null
   opportunity_score: number | null
   score_breakdown: ScoreBreakdown
   context: MarketContextData

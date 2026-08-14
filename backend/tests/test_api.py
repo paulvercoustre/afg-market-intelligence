@@ -113,6 +113,7 @@ def create_tables():
                 product_id INTEGER NOT NULL,
                 market_code TEXT NOT NULL,
                 computed_for_year INTEGER NOT NULL,
+                trade_data_year INTEGER,
                 global_market_size_usd REAL,
                 afg_export_value_usd REAL,
                 yoy_growth_pct REAL,
@@ -189,7 +190,7 @@ def seeded_db():
         ))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
@@ -204,7 +205,7 @@ def seeded_db():
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '699', 2024,
+                p.id, '699', 2024, 2024,
                 1500000, 50000000,
                 3.0, 2,
                 10.5, 8.2, 200000, 15.4,
@@ -219,7 +220,7 @@ def seeded_db():
         """))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
@@ -232,7 +233,7 @@ def seeded_db():
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '276', 2024,
+                p.id, '276', 2024, 2024,
                 800000, 80000000,
                 1.0, 5,
                 5.0, 4.2, 80000, 10.4,
@@ -249,7 +250,7 @@ def seeded_db():
         ))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
@@ -262,7 +263,7 @@ def seeded_db():
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '144', 2024,
+                p.id, '144', 2024, NULL,
                 NULL, 90000000,
                 NULL, NULL,
                 NULL, NULL, NULL, NULL,

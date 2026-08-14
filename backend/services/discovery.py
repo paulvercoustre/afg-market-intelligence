@@ -37,6 +37,7 @@ def get_ranked_markets(
             i.market_code,
             m.country_name       AS market_name,
             i.computed_for_year,
+            i.trade_data_year,
             i.opportunity_score,
             i.global_market_size_usd,
             i.cagr_pct,
@@ -96,6 +97,7 @@ def get_ranked_markets(
             "has_fta": r["has_fta"],
             "language_similarity": _f(r["language_similarity"]),
             "tariff_rate_pct": _f(r["tariff_rate_pct"]),
+            "trade_data_year": r["trade_data_year"],
             "score_breakdown": {
                 "market_size": _f(r["score_market_size"]),
                 "market_growth": _f(r["score_market_growth"]),
@@ -193,6 +195,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         "product_name": product_name,
         "market_code": market_code,
         "market_name": market_name,
+        "computed_for_year": row["computed_for_year"],
         "opportunity_score": _f(row["opportunity_score"]),
         "score_breakdown": {
             "market_size": _f(row["score_market_size"]),
@@ -224,6 +227,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
             "global_market_size_usd": _f(row["global_market_size_usd"]),
             "market_share_pct": _f(row["market_share_pct"]),
             "afg_supplier_rank": row["afg_supplier_rank"],
+            "trade_data_year": row["trade_data_year"],
             "growth": {
                 "yoy_growth_pct": _f(row["yoy_growth_pct"]),
                 "cagr_pct": _f(row["cagr_pct"]),

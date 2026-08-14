@@ -218,10 +218,12 @@ class TestBulkUpsertIndicators:
         assert row["political_stability_year"] == 2023
         assert row["opportunity_score"] is not None
         assert 0 <= float(row["opportunity_score"]) <= 100
-        # FTA/distance/language are static config lookups for India (699) --
-        # confirms the full score_* column set actually persisted, not just
-        # the tariff fields this test targets.
-        assert row["has_fta"] is True
+        # has_fta is derived live from the WITS indicator (AHS vs MFN), not a
+        # static config lookup -- the second upsert's tariff is "MFN", so it
+        # must be False. distance/language are the static config lookups;
+        # checking score_distance confirms the full score_* set persisted,
+        # not just the tariff fields this test targets.
+        assert row["has_fta"] is False
         assert row["score_distance"] is not None
 
     def test_empty_rows_is_a_noop(self, pg_engine):

@@ -234,6 +234,7 @@ def _indicator_to_schema(ind: Indicator, market: Market | None) -> schemas.Marke
         global_market_size_usd=_f(ind.global_market_size_usd),
         market_share_pct=_f(ind.market_share_pct),
         afg_supplier_rank=ind.afg_supplier_rank,
+        trade_data_year=ind.trade_data_year,
         growth=schemas.GrowthMetrics(
             yoy_growth_pct=_f(ind.yoy_growth_pct),
             cagr_pct=_f(ind.cagr_pct),

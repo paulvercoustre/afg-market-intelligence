@@ -89,6 +89,7 @@ class Indicator(Base):
     computed_for_year = Column(Integer, nullable=False)
 
     # Trade indicators
+    trade_data_year = Column(Integer)  # year the trade fields below actually came from -- can be earlier than computed_for_year if this market's Comtrade submission for that year hasn't landed yet
     global_market_size_usd = Column(Numeric(20, 2))
     afg_export_value_usd = Column(Numeric(20, 2))
     yoy_growth_pct = Column(Numeric(10, 4))

@@ -65,6 +65,7 @@ class MarketIndicator(BaseModel):
     global_market_size_usd: float | None
     market_share_pct: float | None
     afg_supplier_rank: int | None
+    trade_data_year: int | None = None
     growth: GrowthMetrics
     price: PriceMetrics
 
@@ -166,6 +167,7 @@ class MarketOpportunity(BaseModel):
     has_fta: bool | None
     language_similarity: float | None
     tariff_rate_pct: float | None = None
+    trade_data_year: int | None = None
     score_breakdown: ScoreBreakdown
     context: MarketContextData
 
@@ -192,6 +194,7 @@ class MarketProfile(BaseModel):
     product_name: str | None
     market_code: str
     market_name: str | None
+    computed_for_year: int | None = None
     opportunity_score: float | None
     score_breakdown: ScoreBreakdown
     context: MarketContextData
