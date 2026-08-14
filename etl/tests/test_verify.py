@@ -68,6 +68,7 @@ def _insert_market_context(engine, **overrides):
 def _insert_indicator(engine, product_id, **overrides):
     row = {
         "product_id": product_id, "market_code": "699", "computed_for_year": 2024,
+        "trade_data_year": None,
         "global_market_size_usd": None, "afg_export_value_usd": None,
         "yoy_growth_pct": None, "cagr_pct": None, "absolute_growth_usd": None,
         "growth_pct": None, "first_year": None, "last_year": None,
