@@ -9,8 +9,8 @@ import pytest
 
 from config import (
     DISTANCE_FROM_KABUL_KM,
-    FTA_STATUS,
     LANGUAGE_SIMILARITY,
+    NUMERIC_TO_ISO3,
     OPPORTUNITY_SCORE_WEIGHTS,
     PRODUCTS,
     YEARS,
@@ -194,12 +194,38 @@ class TestGeographyLookups:
             assert COUNTRY_CODE_PATTERN.match(code), f"invalid distance key {code!r}"
             assert km > 0
 
-    def test_fta_keys_are_numeric_country_codes(self):
-        for code, status in FTA_STATUS.items():
-            assert COUNTRY_CODE_PATTERN.match(code), f"invalid FTA key {code!r}"
-            assert status in ("full", "partial")
+    def test_distance_covers_scored_markets(self):
+        # DISTANCE_FROM_KABUL_KM is generated from reference/distance_from_kabul_km.csv
+        # (CEPII GeoDist) joined through NUMERIC_TO_ISO3 -- every scored market should
+        # resolve except this documented gap (see build_distance_reference.py: CEPII's
+        # 2011 vintage has no entry for Palestine or Montenegro, nor a usable proxy).
+        known_gap = {"275", "499"}  # PSE, MNE
+        missing = set(NUMERIC_TO_ISO3) - set(DISTANCE_FROM_KABUL_KM)
+        assert missing == known_gap, f"distance coverage gap changed unexpectedly: {missing}"
+
+    def test_distance_values_are_plausible(self):
+        # Spot-check real great-circle capital distances (CEPII GeoDist) against
+        # known geography, now that these aren't hand-typed round numbers.
+        assert DISTANCE_FROM_KABUL_KM["586"] < 500      # Pakistan -- closest neighbour
+        assert DISTANCE_FROM_KABUL_KM["842"] > 10_000    # USA -- far side of the globe
+        assert DISTANCE_FROM_KABUL_KM["586"] < DISTANCE_FROM_KABUL_KM["842"]
 
     def test_language_similarity_in_valid_range(self):
         for code, sim in LANGUAGE_SIMILARITY.items():
             assert COUNTRY_CODE_PATTERN.match(code), f"invalid language key {code!r}"
             assert 0.0 <= sim <= 1.0
+
+    def test_language_similarity_covers_scored_markets(self):
+        # LANGUAGE_SIMILARITY is generated from reference/language_similarity_afg.csv
+        # (DICL) joined through NUMERIC_TO_ISO3 -- DICL has full coverage of the
+        # 111 markets the pipeline scores, unlike the CEPII distance data.
+        missing = set(NUMERIC_TO_ISO3) - set(LANGUAGE_SIMILARITY)
+        assert not missing, f"language coverage gap: {missing}"
+
+    def test_language_similarity_values_are_plausible(self):
+        # Spot-check against known linguistics, now that these aren't hand-typed
+        # guesses: Dari's closest relatives (Tajik, Farsi) should clearly outrank
+        # a distant, unrelated-language market like the USA.
+        assert LANGUAGE_SIMILARITY["762"] > 0.3   # Tajikistan -- Tajik ~= Dari
+        assert LANGUAGE_SIMILARITY["364"] > 0.3   # Iran -- Farsi ~= Dari
+        assert LANGUAGE_SIMILARITY["842"] < LANGUAGE_SIMILARITY["364"]  # USA

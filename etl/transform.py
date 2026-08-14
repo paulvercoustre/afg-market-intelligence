@@ -16,9 +16,9 @@ import pandas as pd
 from backend.country_names import resolve_country_name
 from config import (
     DISTANCE_FROM_KABUL_KM,
-    FTA_STATUS,
     LANGUAGE_SIMILARITY,
     LANGUAGE_SIMILARITY_DEFAULT,
+    MAX_GREAT_CIRCLE_DISTANCE_KM,
     OPPORTUNITY_SCORE_WEIGHTS,
     PRICE_COMPETITIVENESS,
     TARIFF_SCORE_PER_PCT,
@@ -362,11 +362,9 @@ def enrich_indicators_with_scores(
 
         # ── Static lookups ────────────────────────────────────────────────────
         dist_km = DISTANCE_FROM_KABUL_KM.get(mc)
-        fta = FTA_STATUS.get(mc)
         lang = LANGUAGE_SIMILARITY.get(mc, LANGUAGE_SIMILARITY_DEFAULT)
 
         row["distance_km"] = dist_km
-        row["has_fta"] = fta is not None
         row["language_similarity"] = lang
 
         # ── World Bank context (latest available year ≤ computed year) ────────
@@ -387,6 +385,19 @@ def enrich_indicators_with_scores(
         row["tariff_indicator"] = tariff_info.get("indicator")
         row["tariff_year"] = tariff_info.get("year")
 
+        # 'AHS' means WITS has an Afghanistan-specific applied-tariff record on
+        # file for this reporter (partner=004, vs the generic partner=000 MFN
+        # rate) -- a real signal of differentiated trade treatment, sourced
+        # live from the same WITS fetch as tariff_rate_pct rather than a
+        # hand-maintained "which FTAs is Afghanistan in" dict. It doesn't
+        # guarantee this specific product's AHS rate is lower than MFN (we
+        # only fetch MFN as a fallback when AHS is unavailable, not always
+        # both, so there's nothing to compare against for AHS rows) -- but
+        # that actual rate, whichever indicator it came from, is already
+        # fully priced into score_tariff below.
+        has_fta = tariff_info.get("indicator") == "AHS"
+        row["has_fta"] = has_fta
+
         # ── Dimension scores (0–100) ─────────────────────────────────────────
         s_size = _score_market_size(row.get("global_market_size_usd"), log_max)
         s_growth = _score_growth(row.get("cagr_pct"))
@@ -395,7 +406,7 @@ def enrich_indicators_with_scores(
         s_foothold = _score_foothold(row.get("afg_export_value_usd"))
         s_distance = _score_distance(dist_km)
         s_language = lang * 100
-        s_fta = 100.0 if fta else 0.0
+        s_fta = 100.0 if has_fta else 0.0
         s_tariff = _score_tariff(tariff_rate)
 
         row["score_market_size"] = round(s_size, 2)
@@ -495,10 +506,21 @@ def _score_foothold(afg_value: float | None) -> float:
 
 
 def _score_distance(dist_km: int | None) -> float:
-    """Closer is better. 0 km → 100, 15 000 km → 0."""
+    """
+    Closer is better, log-scaled: 0 km → 100, MAX_GREAT_CIRCLE_DISTANCE_KM → 0.
+
+    Log rather than linear because trade/transport costs scale with the
+    *ratio* of distance, not the absolute km gap (the standard gravity-model
+    treatment -- see MAX_GREAT_CIRCLE_DISTANCE_KM's definition in config.py).
+    A neighbor at 400km vs. a market 3.5x farther at 1400km loses meaningfully
+    more score than two far markets 1000km apart at 9000km vs. 10000km (only
+    11% farther), even though both pairs differ by the same 1000km.
+    """
     if dist_km is None:
         return 50.0  # neutral default
-    return max(0.0, 100.0 - dist_km / 150)
+    if dist_km <= 0:
+        return 100.0
+    return max(0.0, 100.0 * (1 - math.log1p(dist_km) / math.log1p(MAX_GREAT_CIRCLE_DISTANCE_KM)))
 
 
 def _score_tariff(rate_pct: float | None) -> float:

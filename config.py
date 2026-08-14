@@ -37,158 +37,121 @@ OPPORTUNITY_SCORE_WEIGHTS = {
 # 0% → 100, 10% → 70, 20% → 40, 33%+ → 0  (linear: score = max(0, 100 - rate * 3))
 TARIFF_SCORE_PER_PCT = 3.0
 
-# ── Geographic distance from Kabul, Afghanistan (approximate km) ───────────────
-# Keyed by Comtrade reporter numeric string (same codes used in trade data).
-# NB: Comtrade uses non-standard numeric codes for some countries — India 699,
-# USA 842, Switzerland 757, France 251, Norway 579 — not the ISO 3166 numeric.
-# Values are straight-line distances; rough approximations sufficient for scoring.
-DISTANCE_FROM_KABUL_KM: dict[str, int] = {
-    "586": 450,    # Pakistan
-    "699": 1000,   # India
-    "364": 600,    # Iran
-    "860": 600,    # Uzbekistan
-    "762": 400,    # Tajikistan
-    "795": 800,    # Turkmenistan
-    "398": 1500,   # Kazakhstan
-    "417": 900,    # Kyrgyzstan
-    "156": 3000,   # China
-    "784": 2000,   # UAE
-    "682": 2500,   # Saudi Arabia
-    "792": 3000,   # Turkey
-    "634": 2200,   # Qatar
-    "414": 2200,   # Kuwait
-    "512": 2300,   # Oman
-    "048": 2100,   # Bahrain
-    "400": 2500,   # Jordan
-    "368": 1500,   # Iraq
-    "818": 3500,   # Egypt
-    "276": 5500,   # Germany
-    "826": 6000,   # United Kingdom
-    "528": 6000,   # Netherlands
-    "251": 6000,   # France
-    "380": 5500,   # Italy
-    "56": 6000,    # Belgium
-    "724": 6500,   # Spain
-    "757": 5500,   # Switzerland
-    "040": 5000,   # Austria
-    "616": 5500,   # Poland
-    "203": 5500,   # Czech Republic
-    "752": 5500,   # Sweden
-    "246": 5500,   # Finland
-    "579": 5500,   # Norway
-    "208": 6000,   # Denmark
-    "372": 6000,   # Ireland
-    "300": 4500,   # Greece
-    "642": 4500,   # Romania
-    "100": 4500,   # Bulgaria
-    "348": 5000,   # Hungary
-    "703": 5000,   # Slovakia
-    "842": 12000,  # United States
-    "124": 11000,  # Canada
-    "484": 13000,  # Mexico
-    "076": 13000,  # Brazil
-    "032": 14000,  # Argentina
-    "392": 6500,   # Japan
-    "410": 6000,   # South Korea
-    "702": 5000,   # Singapore
-    "458": 5000,   # Malaysia
-    "360": 5500,   # Indonesia
-    "764": 4500,   # Thailand
-    "704": 5000,   # Vietnam
-    "050": 2000,   # Bangladesh
-    "144": 3000,   # Sri Lanka
-    "524": 1500,   # Nepal
-    "104": 3500,   # Myanmar
-    "608": 5500,   # Philippines
-    "036": 9000,   # Australia
-    "554": 12000,  # New Zealand
-    "710": 8000,   # South Africa
-    "566": 7000,   # Nigeria
-    "012": 7000,   # Algeria
-    "504": 7000,   # Morocco
-    "231": 4000,   # Ethiopia
-    "643": 3500,   # Russia
-    "804": 4000,   # Ukraine
-    "112": 5000,   # Belarus
-    "031": 2000,   # Azerbaijan
-    "268": 2500,   # Georgia
-    "051": 2200,   # Armenia
+# Distance scoring reference ceiling: the greatest possible great-circle
+# distance between two points on Earth (antipodal, ~half the circumference).
+# Used to log-normalise score_distance -- gravity-model trade literature
+# treats distance's effect on trade as multiplicative (an elasticity on
+# ln(distance), not a linear one; see e.g. Disdier & Head 2008's meta-analysis
+# of the distance-trade relationship), matching how score_market_size and
+# score_afg_foothold already log-scale dollar values for the same reason.
+MAX_GREAT_CIRCLE_DISTANCE_KM = 20_015
+
+# ── Comtrade numeric reporter code → ISO-3 alpha code ──────────────────────────
+# NB: Comtrade uses non-standard codes for a few countries (India 699, USA 842,
+# Switzerland 757, France 251, Norway 579) — these must match the codes that
+# actually appear in trade data, not ISO 3166 numeric. Keys must never be
+# zero-padded: real Comtrade reporter codes in trade data (and therefore
+# indicators.market_code) never carry a leading zero, even for naturally
+# short codes like Algeria (12) or Austria (40).
+# Verified by name against the live api.worldbank.org/v2/country list — see
+# tests/test_etl_fetch.py.
+NUMERIC_TO_ISO3: dict[str, str] = {
+    "586": "PAK", "699": "IND", "364": "IRN", "860": "UZB", "762": "TJK",
+    "795": "TKM", "398": "KAZ", "417": "KGZ", "156": "CHN", "784": "ARE",
+    "682": "SAU", "792": "TUR", "634": "QAT", "414": "KWT", "512": "OMN",
+    "48": "BHR", "400": "JOR", "368": "IRQ", "818": "EGY", "276": "DEU",
+    "826": "GBR", "528": "NLD", "251": "FRA", "380": "ITA", "56": "BEL",
+    "724": "ESP", "757": "CHE", "40": "AUT", "616": "POL", "203": "CZE",
+    "752": "SWE", "246": "FIN", "579": "NOR", "208": "DNK", "372": "IRL",
+    "300": "GRC", "642": "ROU", "100": "BGR", "348": "HUN", "703": "SVK",
+    "842": "USA", "124": "CAN", "484": "MEX", "76": "BRA", "32": "ARG",
+    "392": "JPN", "410": "KOR", "702": "SGP", "458": "MYS", "360": "IDN",
+    "764": "THA", "704": "VNM", "50": "BGD", "144": "LKA", "524": "NPL",
+    "104": "MMR", "608": "PHL", "36": "AUS", "554": "NZL", "710": "ZAF",
+    "566": "NGA", "12": "DZA", "504": "MAR", "231": "ETH", "643": "RUS",
+    "804": "UKR", "112": "BLR", "31": "AZE", "268": "GEO", "51": "ARM",
+    "64": "BTN", "462": "MDV",
+    "70": "BIH", "96": "BRN", "191": "HRV", "196": "CYP", "233": "EST",
+    "266": "GAB", "275": "PSE", "320": "GTM", "344": "HKG", "352": "ISL",
+    "376": "ISR", "384": "CIV", "404": "KEN", "418": "LAO", "422": "LBN",
+    "428": "LVA", "430": "LBR", "440": "LTU", "442": "LUX", "450": "MDG",
+    "470": "MLT", "480": "MUS", "496": "MNG", "498": "MDA", "499": "MNE",
+    "508": "MOZ", "604": "PER", "620": "PRT", "646": "RWA", "686": "SEN",
+    "688": "SRB", "705": "SVN", "788": "TUN", "800": "UGA", "807": "MKD",
+    "834": "TZA", "858": "URY", "887": "YEM", "894": "ZMB",
 }
 
-# ── Language / cultural similarity to Dari-Pashto (0.0 → 1.0) ────────────────
-# Based on mutual intelligibility and trade-communication practicality.
-LANGUAGE_SIMILARITY: dict[str, float] = {
-    "364": 1.0,    # Iran — Farsi ≈ Dari
-    "762": 0.9,    # Tajikistan — Tajik ≈ Dari
-    "586": 0.5,    # Pakistan — Urdu/Pashto overlap
-    "860": 0.3,    # Uzbekistan — historical Persian lingua franca
-    "795": 0.3,    # Turkmenistan
-    "398": 0.25,   # Kazakhstan
-    "417": 0.25,   # Kyrgyzstan
-    "699": 0.2,    # India — Hindi/Urdu shares Persian loanwords
-    "050": 0.2,    # Bangladesh
-    "144": 0.15,   # Sri Lanka
-    "524": 0.15,   # Nepal
-    "792": 0.2,    # Turkey — Ottoman Persian heritage
-    "031": 0.2,    # Azerbaijan
-    "268": 0.15,   # Georgia
-    "682": 0.3,    # Saudi Arabia — Arabic loanwords in Dari
-    "784": 0.3,    # UAE
-    "368": 0.3,    # Iraq
-    "400": 0.3,    # Jordan
-    "634": 0.3,    # Qatar
-    "818": 0.3,    # Egypt
-    "842": 0.1,    # USA
-    "826": 0.1,    # UK
-    "124": 0.1,    # Canada
-    "036": 0.1,    # Australia
-}
-# Default language similarity for unlisted countries
+# ── Geographic distance from Kabul, Afghanistan ─────────────────────────────────
+# Great-circle capital-to-capital distance (km), from CEPII's GeoDist dataset
+# (Mayer & Zignago, 2011): https://www.cepii.fr/cepii/en/bdd_modele/bdd_modele_item.asp?id=6
+# reference/distance_from_kabul_km.csv is the checked-in extract (keyed by
+# ISO-3); reference/build_distance_reference.py regenerates it from CEPII's
+# raw dist_cepii.dta. Joined here through NUMERIC_TO_ISO3 to key by the same
+# Comtrade reporter codes the rest of the scoring model uses.
+def _load_distance_from_kabul_km() -> dict[str, int]:
+    import csv
+    from pathlib import Path
+
+    csv_path = Path(__file__).parent / "reference" / "distance_from_kabul_km.csv"
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        iso3_to_km = {row["iso3"]: round(float(row["distance_km"])) for row in csv.DictReader(f)}
+
+    return {
+        code: iso3_to_km[iso3]
+        for code, iso3 in NUMERIC_TO_ISO3.items()
+        if iso3 in iso3_to_km
+    }
+
+
+DISTANCE_FROM_KABUL_KM: dict[str, int] = _load_distance_from_kabul_km()
+
+# ── Language similarity to Dari-Pashto (0.0 → 1.0) ──────────────────────────────
+# Blend of two DICL indices (Gurevich, Herman, Toubal & Yotov, 2025 --
+# https://doi.org/10.7910/DVN/8WGJTL): `lp` (linguistic proximity -- mutual
+# intelligibility across related-but-distinct languages, e.g. Dari<->Farsi<->
+# Tajik) at the dominant weight, plus `cnl` (common native language -- literal
+# shared-native-language population overlap) at a lower weight so two
+# countries that speak the exact same named language outrank two that merely
+# speak close relatives. reference/language_similarity_afg.csv is the
+# checked-in extract (keyed by ISO-3); reference/build_language_reference.py
+# regenerates it from reference/dicl.csv. Deliberately excludes DICL's `col`
+# (common official language) -- blending that in (as DICL's own `cl` composite
+# does) lets a binary official-language flag dominate: it ranks Turkmenistan
+# above Iran/Tajikistan on the strength of Turkmen's minor constitutional
+# status in Afghanistan, despite Dari being far closer to Farsi/Tajik in
+# actual mutual intelligibility.
+LANGUAGE_SIMILARITY_LP_WEIGHT = 0.8  # remainder (0.2) goes to cnl
+
+
+def _load_language_similarity() -> dict[str, float]:
+    import csv
+    from pathlib import Path
+
+    csv_path = Path(__file__).parent / "reference" / "language_similarity_afg.csv"
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        iso3_to_score = {
+            row["iso3"]: (
+                LANGUAGE_SIMILARITY_LP_WEIGHT * float(row["lp"])
+                + (1 - LANGUAGE_SIMILARITY_LP_WEIGHT) * float(row["cnl"])
+            )
+            for row in csv.DictReader(f)
+        }
+
+    return {
+        code: round(iso3_to_score[iso3], 4)
+        for code, iso3 in NUMERIC_TO_ISO3.items()
+        if iso3 in iso3_to_score
+    }
+
+
+LANGUAGE_SIMILARITY: dict[str, float] = _load_language_similarity()
+# Default language similarity for markets with no DICL match
 LANGUAGE_SIMILARITY_DEFAULT = 0.05
 
-# ── Free Trade Agreement / preferential trade access ──────────────────────────
-# Afghanistan FTA memberships: SAARC/SAPTA, ECO, GSP in EU/UK/others.
-# Values: 'full', 'partial', or None.
-FTA_STATUS: dict[str, str] = {
-    # SAARC Preferential Trading Arrangement (SAPTA)
-    "699": "partial",   # India
-    "586": "partial",   # Pakistan
-    "050": "partial",   # Bangladesh
-    "144": "partial",   # Sri Lanka
-    "524": "partial",   # Nepal
-    "064": "partial",   # Bhutan
-    "462": "partial",   # Maldives
-    # ECO Trade Agreement
-    "364": "partial",   # Iran
-    "792": "partial",   # Turkey
-    "398": "partial",   # Kazakhstan
-    "417": "partial",   # Kyrgyzstan
-    "762": "partial",   # Tajikistan
-    "795": "partial",   # Turkmenistan
-    "860": "partial",   # Uzbekistan
-    "031": "partial",   # Azerbaijan
-    # EU GSP+ (significant tariff reduction)
-    "276": "partial",   # Germany
-    "528": "partial",   # Netherlands
-    "251": "partial",   # France
-    "380": "partial",   # Italy
-    "56": "partial",    # Belgium
-    "724": "partial",   # Spain
-    "757": "partial",   # Switzerland (GSP)
-    "040": "partial",   # Austria
-    "616": "partial",   # Poland
-    "203": "partial",   # Czech Republic
-    "752": "partial",   # Sweden
-    "246": "partial",   # Finland
-    "579": "partial",   # Norway (GSP)
-    "208": "partial",   # Denmark
-    "372": "partial",   # Ireland
-    "300": "partial",   # Greece
-    "642": "partial",   # Romania
-    "100": "partial",   # Bulgaria
-    "348": "partial",   # Hungary
-    "826": "partial",   # UK (post-Brexit GSP)
-}
+# NB: preferential/FTA trade access is no longer a static lookup here -- it's
+# derived live in etl/transform.py from WITS's own AHS/MFN partner-segment
+# indicator (indicators.tariff_indicator == 'AHS'), which is already fetched
+# for the tariff dimension. See enrich_indicators_with_scores().
 
 # Products keyed by primary HS code (6-digit, no dots).
 # 'codes' lists all HS codes that roll up into one product entry.

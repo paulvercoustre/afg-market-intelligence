@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from config import OPPORTUNITY_SCORE_WEIGHTS, TARIFF_SCORE_PER_PCT
+from config import MAX_GREAT_CIRCLE_DISTANCE_KM, OPPORTUNITY_SCORE_WEIGHTS, TARIFF_SCORE_PER_PCT
 from etl.transform import (
     _latest_wb_context,
     _score_distance,
@@ -54,7 +54,24 @@ class TestDimensionScores:
     def test_distance_boundaries(self):
         assert _score_distance(None) == 50.0
         assert _score_distance(0) == pytest.approx(100.0)
-        assert _score_distance(15_000) == pytest.approx(0.0)
+        assert _score_distance(MAX_GREAT_CIRCLE_DISTANCE_KM) == pytest.approx(0.0)
+
+    def test_distance_log_scale(self):
+        # Equal ratios should cost roughly equal score, not equal km -- a 10x
+        # jump from 100km to 1000km should cost about as much score as 1000km
+        # to 10000km (also a 10x jump), unlike the old linear formula where
+        # only the absolute km gap mattered.
+        cost_of_10x_from_100km = _score_distance(100) - _score_distance(1_000)
+        cost_of_10x_from_1000km = _score_distance(1_000) - _score_distance(10_000)
+        assert cost_of_10x_from_100km == pytest.approx(cost_of_10x_from_1000km, rel=0.05)
+
+        # By contrast, two equal absolute-km gaps (900km) at different points
+        # on the scale should cost very different amounts -- the near one
+        # (100km -> 1000km, a 10x ratio) should cost far more than the far one
+        # (9000km -> 9900km, a 10% ratio).
+        cost_of_900km_near = _score_distance(100) - _score_distance(1_000)
+        cost_of_900km_far = _score_distance(9_000) - _score_distance(9_900)
+        assert cost_of_900km_near > cost_of_900km_far * 5
 
     def test_tariff_boundaries(self):
         assert _score_tariff(None) == 50.0
@@ -158,7 +175,12 @@ class TestEnrichIndicatorsWithScores:
             + enriched["score_language"] * weights["language"]
             + enriched["score_fta"] * weights["fta_status"]
         )
-        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2))
+        # abs tolerance, not just rel: `expected` sums sub-scores that were each
+        # already rounded to 2dp, while opportunity_score rounds the sum of the
+        # unrounded sub-scores -- the two can drift by a cent or two from
+        # double-rounding, e.g. a sub-score of x.xx5 rounding a different way
+        # in each path.
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
 
     def test_neutral_defaults_without_wb_and_tariff(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(
@@ -176,15 +198,40 @@ class TestEnrichIndicatorsWithScores:
         assert row["tariff_rate_pct"] is None
         assert row["tariff_year"] is None
 
-    def test_fta_bonus_applied(self, sample_indicator_row):
-        # India (699) has partial FTA in config
+    def test_fta_bonus_applied_when_wits_reports_ahs(self, sample_indicator_row):
+        # has_fta is derived live from WITS's own AHS/MFN partner-segment
+        # indicator (indicators.tariff_indicator), not a hand-maintained "which
+        # FTAs is Afghanistan in" dict -- 'AHS' means WITS has an
+        # Afghanistan-specific applied-tariff record on file for this reporter.
+        rows = enrich_indicators_with_scores(
+            [sample_indicator_row.copy()],
+            market_context={},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "AHS", "year": 2022}},
+        )
+        assert rows[0]["has_fta"] is True
+        assert rows[0]["score_fta"] == pytest.approx(100.0)
+
+    def test_fta_bonus_not_applied_for_mfn(self, sample_indicator_row):
+        # MFN means only the generic World-partner rate was found -- no
+        # Afghanistan-specific record, so no differentiated-treatment bonus.
+        rows = enrich_indicators_with_scores(
+            [sample_indicator_row.copy()],
+            market_context={},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
+        )
+        assert rows[0]["has_fta"] is False
+        assert rows[0]["score_fta"] == pytest.approx(0.0)
+
+    def test_fta_bonus_not_applied_when_no_tariff_data(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
             all_market_sizes={"699": 10_000_000},
         )
-        assert rows[0]["has_fta"] is True
-        assert rows[0]["score_fta"] == pytest.approx(100.0)
+        assert rows[0]["has_fta"] is False
+        assert rows[0]["score_fta"] == pytest.approx(0.0)
 
     def test_empty_input_passthrough(self):
         assert enrich_indicators_with_scores([], {}, {}) == []
