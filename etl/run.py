@@ -23,7 +23,7 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from backend.country_names import resolve_country_name
-from config import PRODUCTS, TOP_N_MARKETS, YEARS
+from config import NUMERIC_TO_ISO3, PRODUCTS, TOP_N_MARKETS, YEARS
 from etl import fetch, load, transform
 
 logging.basicConfig(
@@ -100,6 +100,7 @@ def run_product(
     dry_run: bool,
     market_context: dict[str, dict],  # {country_code: {year: {field: value}}}
     skip_tariffs: bool = False,
+    refresh_cache: bool = False,
 ) -> dict:
     hs_codes = cfg["codes"]
     logger.info(f"▶  {product_name}  ({', '.join(hs_codes)})")
@@ -183,7 +184,7 @@ def run_product(
     tariffs = {}
     if not skip_tariffs:
         try:
-            tariffs = _fetch_tariffs_for_product(all_codes, hs_codes, YEARS)
+            tariffs = _fetch_tariffs_for_product(all_codes, hs_codes, YEARS, refresh_cache=refresh_cache)
             logger.info(f"  {tag} Fetched tariff data for {len(tariffs)} markets")
         except Exception as exc:
             logger.warning(f"  {tag} Tariff fetch failed: {exc} — continuing without tariff scores")
@@ -201,7 +202,7 @@ def run_product(
 
 
 def _fetch_tariffs_for_product(market_codes: list[str], hs_codes: list[str],
-                               years: list[int]) -> dict[str, dict]:
+                               years: list[int], refresh_cache: bool = False) -> dict[str, dict]:
     """
     Fetch tariff data for the given markets and HS codes.
     Returns {market_numeric_code: {'rate': float, 'indicator': str, 'year': int}}
@@ -211,7 +212,7 @@ def _fetch_tariffs_for_product(market_codes: list[str], hs_codes: list[str],
     code returned for a given market shares the same year, so taking the last
     one seen (like 'indicator' below) is safe.
     """
-    rows = fetch.fetch_tariff_rates(market_codes, hs_codes, years)
+    rows = fetch.fetch_tariff_rates(market_codes, hs_codes, years, refresh_cache=refresh_cache)
 
     # Aggregate per market: average rate across the product's HS codes.
     by_market: dict[str, list[float]] = {}
@@ -269,7 +270,7 @@ def _build_market_context(wb_rows: list[dict]) -> dict[str, dict[int, dict]]:
 
     return {
         numeric: ctx_iso3[iso3]
-        for numeric, iso3 in _load_numeric_to_iso3().items()
+        for numeric, iso3 in NUMERIC_TO_ISO3.items()
         if iso3 in ctx_iso3
     }
 
@@ -296,6 +297,11 @@ def main():
         "--skip-tariffs", action="store_true",
         help="Skip WITS tariff fetch (faster runs; tariff scores default to neutral)",
     )
+    parser.add_argument(
+        "--refresh-cache", action="store_true",
+        help="Bypass the on-disk WITS tariff cache and force a fresh fetch, "
+             "regardless of cache age (normally cache entries auto-expire after 7 days)",
+    )
     args = parser.parse_args()
 
     target = args.products or list(PRODUCTS.keys())
@@ -320,14 +326,14 @@ def main():
             # (WB accepts ISO-3 alpha; Comtrade uses numeric codes).
             #
             # The set of countries to fetch is driven directly by
-            # _load_numeric_to_iso3()'s own keys -- it must NOT be filtered
-            # through an unrelated table like DISTANCE_FROM_KABUL_KM (a prior
-            # version did exactly that): that table is maintained for a
-            # different scoring dimension entirely and has its own, different
-            # set of gaps, so gating World Bank fetches on it silently
-            # dropped every country present in one table but not the other,
-            # regardless of whether WB data was actually available for them.
-            iso3_codes = list(_load_numeric_to_iso3().values())
+            # NUMERIC_TO_ISO3's own keys -- it must NOT be filtered through an
+            # unrelated table like DISTANCE_FROM_KABUL_KM (a prior version did
+            # exactly that): that table is maintained for a different scoring
+            # dimension entirely and has its own, different set of gaps, so
+            # gating World Bank fetches on it silently dropped every country
+            # present in one table but not the other, regardless of whether WB
+            # data was actually available for them.
+            iso3_codes = list(NUMERIC_TO_ISO3.values())
 
             logger.info(f"Fetching World Bank indicators for {len(iso3_codes)} countries…")
             try:
@@ -346,7 +352,8 @@ def main():
     with ThreadPoolExecutor(max_workers=_PRODUCT_MAX_WORKERS) as pool:
         futures = {
             pool.submit(run_product, engine, name, PRODUCTS[name], dry_run=args.dry_run,
-                       market_context=market_context, skip_tariffs=args.skip_tariffs): name
+                       market_context=market_context, skip_tariffs=args.skip_tariffs,
+                       refresh_cache=args.refresh_cache): name
             for name in target
         }
         for future in as_completed(futures):
@@ -371,53 +378,6 @@ def main():
     if engine and not args.dry_run:
         status = "success" if not all_errors else "partial"
         load.log_pipeline_run(engine, status, successes, all_errors)
-
-
-def _load_numeric_to_iso3() -> dict[str, str]:
-    """
-    Mapping from Comtrade numeric reporter codes to ISO-3 alpha codes for the
-    World Bank API. NB: Comtrade uses non-standard codes for a few countries
-    (India 699, USA 842, Switzerland 757, France 251, Norway 579) — these must
-    match the codes that actually appear in trade data, not ISO 3166 numeric.
-
-    Keys must never be zero-padded: real Comtrade reporter codes in trade data
-    (and therefore indicators.market_code) never carry a leading zero, even
-    for naturally 1-2 digit codes like Algeria (12) or Austria (40). A
-    previous version zero-padded a handful of these ("012", "040", "048", ...)
-    which made them silently un-lookupable against real market codes -- the
-    country was "in the dict" but the key never matched anything, so those
-    markets got no World Bank data at all despite this function claiming to
-    cover them. Fixed here; see tests/test_etl_fetch.py for the regression test.
-    """
-    return {
-        "586": "PAK", "699": "IND", "364": "IRN", "860": "UZB", "762": "TJK",
-        "795": "TKM", "398": "KAZ", "417": "KGZ", "156": "CHN", "784": "ARE",
-        "682": "SAU", "792": "TUR", "634": "QAT", "414": "KWT", "512": "OMN",
-        "48": "BHR", "400": "JOR", "368": "IRQ", "818": "EGY", "276": "DEU",
-        "826": "GBR", "528": "NLD", "251": "FRA", "380": "ITA", "56": "BEL",
-        "724": "ESP", "757": "CHE", "40": "AUT", "616": "POL", "203": "CZE",
-        "752": "SWE", "246": "FIN", "579": "NOR", "208": "DNK", "372": "IRL",
-        "300": "GRC", "642": "ROU", "100": "BGR", "348": "HUN", "703": "SVK",
-        "842": "USA", "124": "CAN", "484": "MEX", "76": "BRA", "32": "ARG",
-        "392": "JPN", "410": "KOR", "702": "SGP", "458": "MYS", "360": "IDN",
-        "764": "THA", "704": "VNM", "50": "BGD", "144": "LKA", "524": "NPL",
-        "104": "MMR", "608": "PHL", "36": "AUS", "554": "NZL", "710": "ZAF",
-        "566": "NGA", "12": "DZA", "504": "MAR", "231": "ETH", "643": "RUS",
-        "804": "UKR", "112": "BLR", "31": "AZE", "268": "GEO", "51": "ARM",
-        "64": "BTN", "462": "MDV",
-        # Added after auditing against the full set of markets the pipeline
-        # actually scores (103 as of 2026-07-31) vs. this mapping (72 at the
-        # time) -- these 39 were real, active markets with zero World Bank
-        # data because no translation entry existed for them at all.
-        "70": "BIH", "96": "BRN", "191": "HRV", "196": "CYP", "233": "EST",
-        "266": "GAB", "275": "PSE", "320": "GTM", "344": "HKG", "352": "ISL",
-        "376": "ISR", "384": "CIV", "404": "KEN", "418": "LAO", "422": "LBN",
-        "428": "LVA", "430": "LBR", "440": "LTU", "442": "LUX", "450": "MDG",
-        "470": "MLT", "480": "MUS", "496": "MNG", "498": "MDA", "499": "MNE",
-        "508": "MOZ", "604": "PER", "620": "PRT", "646": "RWA", "686": "SEN",
-        "688": "SRB", "705": "SVN", "788": "TUN", "800": "UGA", "807": "MKD",
-        "834": "TZA", "858": "URY", "887": "YEM", "894": "ZMB",
-    }
 
 
 if __name__ == "__main__":

@@ -4,8 +4,22 @@ from unittest.mock import patch
 
 import pytest
 
+from config import NUMERIC_TO_ISO3
 from etl import fetch
-from etl.run import _build_market_context, _load_numeric_to_iso3
+from etl.run import _build_market_context
+
+
+@pytest.fixture(autouse=True)
+def _isolate_wits_disk_cache(tmp_path, monkeypatch):
+    """
+    Every test gets a fresh, throwaway on-disk WITS cache. Without this,
+    tests would read/write etl/.cache/wits_tariffs.json -- the same file a
+    real ETL run uses -- and tests reusing the same (reporter, partner, year)
+    key (e.g. "356"/"000"/2022) would leak cached results between each other.
+    """
+    monkeypatch.setattr(fetch, "_WITS_CACHE_PATH", tmp_path / "wits_tariffs.json")
+    monkeypatch.setattr(fetch, "_wits_disk_cache", {})
+    monkeypatch.setattr(fetch, "_wits_cache", {})
 
 
 def _wits_payload(products: dict[str, float], reporter="356", partner="000"):
@@ -212,7 +226,7 @@ class TestFetchTariffRates:
         fetch._wits_cache.clear()
 
     def test_prefers_afg_specific_rates(self):
-        def fake(reporter, partner, year):
+        def fake(reporter, partner, year, refresh=False):
             if partner == fetch._WITS_AFG_PARTNER:
                 return {"080620": 5.0}
             return {"080620": 20.0}
@@ -229,7 +243,7 @@ class TestFetchTariffRates:
         }]
 
     def test_falls_back_to_mfn(self):
-        def fake(reporter, partner, year):
+        def fake(reporter, partner, year, refresh=False):
             if partner == fetch._WITS_WORLD_PARTNER:
                 return {"080620": 20.0}
             return {}
@@ -244,7 +258,7 @@ class TestFetchTariffRates:
     def test_tries_years_descending(self):
         calls = []
 
-        def fake(reporter, partner, year):
+        def fake(reporter, partner, year, refresh=False):
             calls.append(year)
             return {"080620": 10.0} if year == 2022 else {}
 
@@ -261,7 +275,7 @@ class TestFetchTariffRates:
     def test_comtrade_specific_codes_remapped_for_wits(self):
         seen_reporters = []
 
-        def fake(reporter, partner, year):
+        def fake(reporter, partner, year, refresh=False):
             seen_reporters.append(reporter)
             return {}
 
@@ -386,7 +400,7 @@ class TestBuildMarketContext:
         assert isinstance(value, float) and value == 1500.25
 
     def test_mapping_uses_comtrade_codes(self):
-        mapping = _load_numeric_to_iso3()
+        mapping = NUMERIC_TO_ISO3
         # Comtrade-specific codes must be present…
         assert mapping["699"] == "IND"
         assert mapping["842"] == "USA"
@@ -406,7 +420,7 @@ class TestBuildMarketContext:
         # under a key that never matches a real market_code, so those
         # countries got no World Bank data despite this function claiming
         # to cover them.
-        mapping = _load_numeric_to_iso3()
+        mapping = NUMERIC_TO_ISO3
         for key in mapping:
             assert key == str(int(key)), f"{key!r} is zero-padded and will never match a real market_code"
 
@@ -420,7 +434,7 @@ class TestBuildMarketContext:
         # had no entry at all before, and one case (Romania) where a *different*
         # reference (WITS's own country-code page, which uses "ROM") would
         # have been wrong -- the World Bank's own API confirms "ROU" is correct.
-        mapping = _load_numeric_to_iso3()
+        mapping = NUMERIC_TO_ISO3
         verified = {
             # previously zero-padded, now fixed
             "48": "BHR", "40": "AUT", "76": "BRA", "32": "ARG", "36": "AUS",

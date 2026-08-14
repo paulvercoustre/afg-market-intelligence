@@ -48,10 +48,19 @@ build/
 # ETL logs
 etl_run.log
 
+# ETL disk caches (local speedup only, safe to delete/regenerate)
+etl/.cache/
+
 # Node / frontend
 frontend/node_modules/
 frontend/.next/
 frontend/out/
 
 # Alembic (don't ignore versions — they're source)
+
+# Third-party copyrighted reprint -- Springer Nature's terms prohibit
+# uploading their journal content to a repository (dicl.csv itself is fine,
+# it's the underlying data, published separately by Harvard Dataverse under
+# CC BY-NC-ND). See reference/build_language_reference.py for the citation.
+reference/A_Dataset_on_Linguistic_Connectivity_Across_and_Wi.pdf
 

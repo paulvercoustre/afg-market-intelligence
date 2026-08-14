@@ -88,7 +88,7 @@ class TestRunProductHsCodeResilience:
 class TestMainConcurrentProductResilience:
     def test_one_product_crashing_does_not_abort_the_run(self, monkeypatch, caplog):
         def fake_run_product(engine, product_name, cfg, dry_run, market_context,
-                              skip_tariffs=False):
+                              skip_tariffs=False, refresh_cache=False):
             if product_name == "Cumin Seeds":
                 raise RuntimeError("simulated fetch crash")
             return {"product": product_name, "status": "success", "errors": []}
@@ -226,7 +226,7 @@ class TestResolveMarketName:
 
 class TestFetchTariffsForProduct:
     def test_averages_rate_across_hs_codes_for_same_market(self, monkeypatch):
-        def fake_fetch_tariff_rates(market_codes, hs_codes, years):
+        def fake_fetch_tariff_rates(market_codes, hs_codes, years, refresh_cache=False):
             return [
                 {"market_code": "699", "hs_code": "080211", "tariff_rate_pct": 10.0,
                  "indicator": "AHS", "year": 2023},
@@ -241,7 +241,7 @@ class TestFetchTariffsForProduct:
         assert result["699"]["year"] == 2023
 
     def test_multiple_markets_kept_independent(self, monkeypatch):
-        def fake_fetch_tariff_rates(market_codes, hs_codes, years):
+        def fake_fetch_tariff_rates(market_codes, hs_codes, years, refresh_cache=False):
             return [
                 {"market_code": "699", "hs_code": "080211", "tariff_rate_pct": 10.0,
                  "indicator": "AHS", "year": 2023},

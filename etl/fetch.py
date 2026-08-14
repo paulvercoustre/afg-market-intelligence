@@ -7,10 +7,14 @@ Comtrade improvements over the original client:
 - Proper SSL verification via certifi (no global monkey-patch)
 """
 
+import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import certifi
 import comtradeapicall
@@ -354,6 +358,36 @@ _COMTRADE_TO_WITS_NUMERIC = {
 # {(reporter, partner, year): {hs6: rate}} — one fetch per key per process
 _wits_cache: dict[tuple[str, str, int], dict[str, float]] = {}
 
+# Disk-backed cache so re-running the ETL doesn't re-fetch combos already
+# downloaded recently (each one costs 30-60s against WITS). Entries expire
+# after _WITS_CACHE_TTL so an update WITS publishes upstream is still picked
+# up automatically within that window, rather than being cached forever.
+_WITS_CACHE_PATH = Path(__file__).parent / ".cache" / "wits_tariffs.json"
+_WITS_CACHE_TTL = timedelta(days=7)
+_wits_disk_cache_lock = threading.Lock()
+
+
+def _load_wits_disk_cache() -> dict:
+    if not _WITS_CACHE_PATH.exists():
+        return {}
+    try:
+        with open(_WITS_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"WITS disk cache unreadable, starting fresh: {exc}")
+        return {}
+
+
+def _save_wits_disk_cache(cache: dict) -> None:
+    _WITS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _WITS_CACHE_PATH.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
+    tmp_path.replace(_WITS_CACHE_PATH)  # atomic replace, safe if a run is killed mid-write
+
+
+_wits_disk_cache = _load_wits_disk_cache()
+
 
 @retry(
     retry=retry_if_exception_type((ConnectionError, TimeoutError, requests.RequestException)),
@@ -451,16 +485,36 @@ def _parse_wits_tariffs(data: dict) -> dict[str, float]:
         return {}
 
 
-def _cached_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, float]:
+def _cached_wits_tariffs(reporter: str, partner: str, year: int, refresh: bool = False) -> dict[str, float]:
     key = (reporter, partner, year)
-    if key not in _wits_cache:
-        try:
-            _wits_cache[key] = _fetch_wits_tariffs(reporter, partner, year)
-        except Exception as exc:
-            logger.warning(f"WITS fetch failed for reporter {reporter} partner {partner} {year}: {exc}")
-            _wits_cache[key] = {}
-        time.sleep(0.5)
-    return _wits_cache[key]
+    if key in _wits_cache:
+        return _wits_cache[key]
+
+    disk_key = f"{reporter}|{partner}|{year}"
+    if not refresh:
+        with _wits_disk_cache_lock:
+            entry = _wits_disk_cache.get(disk_key)
+        if entry is not None:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(entry["fetched_at"])
+            if age < _WITS_CACHE_TTL:
+                _wits_cache[key] = entry["data"]
+                return entry["data"]
+
+    try:
+        data = _fetch_wits_tariffs(reporter, partner, year)
+    except Exception as exc:
+        logger.warning(f"WITS fetch failed for reporter {reporter} partner {partner} {year}: {exc}")
+        data = {}
+
+    _wits_cache[key] = data
+    with _wits_disk_cache_lock:
+        _wits_disk_cache[disk_key] = {
+            "data": data,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_wits_disk_cache(_wits_disk_cache)
+    time.sleep(0.5)
+    return data
 
 
 # Concurrent market lookups for the WITS step: it can't batch multiple
@@ -471,18 +525,19 @@ def _cached_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, fl
 _TARIFF_MAX_WORKERS = 8
 
 
-def _tariff_rows_for_market(market_code: str, hs_set: set[str], years_desc: list[int]) -> list[dict]:
+def _tariff_rows_for_market(market_code: str, hs_set: set[str], years_desc: list[int],
+                            refresh: bool = False) -> list[dict]:
     reporter = _COMTRADE_TO_WITS_NUMERIC.get(market_code, market_code).zfill(3)
 
     found: dict[str, float] = {}
     indicator_used = None
     for year in years_desc:
-        ahs = _cached_wits_tariffs(reporter, _WITS_AFG_PARTNER, year)
+        ahs = _cached_wits_tariffs(reporter, _WITS_AFG_PARTNER, year, refresh=refresh)
         found = {hs: ahs[hs] for hs in hs_set if hs in ahs}
         if found:
             indicator_used = "AHS"
         else:
-            mfn = _cached_wits_tariffs(reporter, _WITS_WORLD_PARTNER, year)
+            mfn = _cached_wits_tariffs(reporter, _WITS_WORLD_PARTNER, year, refresh=refresh)
             found = {hs: mfn[hs] for hs in hs_set if hs in mfn}
             if found:
                 indicator_used = "MFN"
@@ -504,7 +559,7 @@ def _tariff_rows_for_market(market_code: str, hs_set: set[str], years_desc: list
 
 
 def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
-                       years: list[int]) -> list[dict]:
+                       years: list[int], refresh_cache: bool = False) -> list[dict]:
     """
     Fetch tariff rates for the given markets (Comtrade numeric codes) and HS codes.
 
@@ -513,8 +568,11 @@ def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
     are preferred, falling back to MFN rates (partner=000).
 
     Downloads are cached per (reporter, partner, year) covering all products,
-    so subsequent calls for other products reuse them. Markets are looked up
-    concurrently (see _TARIFF_MAX_WORKERS) with progress logged periodically.
+    on disk as well as in-process, so subsequent runs reuse them too as long
+    as the entry is under _WITS_CACHE_TTL old. Pass refresh_cache=True to
+    bypass the disk cache and force a fresh fetch regardless of age. Markets
+    are looked up concurrently (see _TARIFF_MAX_WORKERS) with progress logged
+    periodically.
 
     Returns list of dicts:
       {market_code: str, hs_code: str, tariff_rate_pct: float,
@@ -530,7 +588,8 @@ def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
     done = 0
     with ThreadPoolExecutor(max_workers=_TARIFF_MAX_WORKERS) as pool:
         futures = {
-            pool.submit(_tariff_rows_for_market, market_code, hs_set, years_desc): market_code
+            pool.submit(_tariff_rows_for_market, market_code, hs_set, years_desc,
+                       refresh_cache): market_code
             for market_code in market_codes
         }
         for future in as_completed(futures):
