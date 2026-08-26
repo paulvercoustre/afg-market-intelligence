@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import certifi
@@ -372,7 +372,7 @@ def _load_wits_disk_cache() -> dict:
     if not _WITS_CACHE_PATH.exists():
         return {}
     try:
-        with open(_WITS_CACHE_PATH, "r", encoding="utf-8") as f:
+        with open(_WITS_CACHE_PATH, encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning(f"WITS disk cache unreadable, starting fresh: {exc}")
@@ -506,7 +506,7 @@ def _cached_wits_tariffs(reporter: str, partner: str, year: int, refresh: bool =
         with _wits_disk_cache_lock:
             entry = _wits_disk_cache.get(disk_key)
         if entry is not None:
-            age = datetime.now(timezone.utc) - datetime.fromisoformat(entry["fetched_at"])
+            age = datetime.now(UTC) - datetime.fromisoformat(entry["fetched_at"])
             if age < _WITS_CACHE_TTL:
                 _wits_cache[key] = entry["data"]
                 return entry["data"]
@@ -532,7 +532,7 @@ def _cached_wits_tariffs(reporter: str, partner: str, year: int, refresh: bool =
     with _wits_disk_cache_lock:
         _wits_disk_cache[disk_key] = {
             "data": data,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": datetime.now(UTC).isoformat(),
         }
         _save_wits_disk_cache(_wits_disk_cache)
     time.sleep(0.5)
