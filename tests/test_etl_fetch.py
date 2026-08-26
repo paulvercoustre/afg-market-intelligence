@@ -157,11 +157,14 @@ class TestFetchWitsTariffsHttp:
         monkeypatch.setattr(fetch._WITS_SESSION, "get", lambda *a, **k: FakeResponse())
         assert fetch._fetch_wits_tariffs("356", "000", 2022) == {}
 
-    def test_retries_three_times_before_giving_up(self):
+    def test_retries_five_times_before_giving_up(self):
         # Regression test for the retry budget: a slow/flaky WITS response
-        # should get a couple of extra chances before the product's tariff
-        # fetch is treated as failed.
-        assert fetch._fetch_wits_tariffs.retry.stop.max_attempt_number == 3
+        # should get several extra chances before the product's tariff
+        # fetch is treated as failed (a genuinely failed fetch is never
+        # cached as "confirmed no data" -- see TestCachedWitsTariffs -- so
+        # this budget is just about not giving up too early on a transient
+        # blip within the current attempt).
+        assert fetch._fetch_wits_tariffs.retry.stop.max_attempt_number == 5
 
 
 class TestWitsConnectionPool:
@@ -203,7 +206,12 @@ class TestCachedWitsTariffs:
         assert first == second == {"080620": 5.0}
         assert calls == [("356", "000", 2022)]  # only fetched once, second call hit cache
 
-    def test_failed_fetch_is_cached_as_empty_not_retried_forever(self):
+    def test_failed_fetch_is_not_cached_and_is_retried_next_call(self):
+        # A failed fetch (timeout/connection error) is NOT the same as WITS
+        # confirming there's no data -- caching it as empty would silently
+        # persist a false "no data" for up to 7 days. So a failure must not
+        # be written to either cache: the next call for the same key should
+        # hit _fetch_wits_tariffs again, not reuse a stale non-answer.
         calls = []
 
         def fake(reporter, partner, year):
@@ -215,7 +223,25 @@ class TestCachedWitsTariffs:
             second = fetch._cached_wits_tariffs("356", "000", 2022)
 
         assert first == second == {}
-        assert len(calls) == 1
+        assert len(calls) == 2  # retried, not served from a poisoned cache
+
+    def test_successful_empty_result_is_still_cached(self):
+        # A genuine confirmed-empty result (e.g. a real 404, already turned
+        # into {} by _fetch_wits_tariffs without raising) IS a real answer
+        # and should still be cached normally -- only fetch *failures* skip
+        # the cache.
+        calls = []
+
+        def fake(reporter, partner, year):
+            calls.append(1)
+            return {}
+
+        with patch.object(fetch, "_fetch_wits_tariffs", side_effect=fake):
+            first = fetch._cached_wits_tariffs("356", "000", 2022)
+            second = fetch._cached_wits_tariffs("356", "000", 2022)
+
+        assert first == second == {}
+        assert len(calls) == 1  # not retried -- this was a real answer
 
 
 class TestFetchTariffRates:

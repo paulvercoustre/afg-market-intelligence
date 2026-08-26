@@ -390,9 +390,19 @@ _wits_disk_cache = _load_wits_disk_cache()
 
 
 @retry(
+    # 404 ("not reported") returns {} immediately below, before raise_for_status
+    # can fire, so it never enters this retry loop -- that's already a real,
+    # trustworthy answer from WITS and retrying it wouldn't change anything.
+    # This retry budget exists purely for the ambiguous case (timeout,
+    # connection drop, 5xx) where we genuinely don't know yet whether there's
+    # data or not. 5 attempts with backoff up to 30s gives a flaky connection
+    # a real chance to clear before we give up *for this call* -- see
+    # _cached_wits_tariffs for what happens after that (a "still don't know"
+    # is never written to cache, so the next run tries again from scratch
+    # rather than a transient blip being remembered as "confirmed no data").
     retry=retry_if_exception_type((ConnectionError, TimeoutError, requests.RequestException)),
-    wait=wait_exponential(multiplier=1, min=2, max=16),
-    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    stop=stop_after_attempt(5),
     reraise=True,
 )
 def _fetch_wits_tariffs(reporter: str, partner: str, year: int) -> dict[str, float]:
@@ -503,8 +513,19 @@ def _cached_wits_tariffs(reporter: str, partner: str, year: int, refresh: bool =
     try:
         data = _fetch_wits_tariffs(reporter, partner, year)
     except Exception as exc:
+        # A failed fetch (timeout/connection error, all 5 retries exhausted in
+        # _fetch_wits_tariffs) is NOT the same thing as WITS confirming there's
+        # no data -- a real 404 already returns a plain {} from
+        # _fetch_wits_tariffs without raising, and that IS worth remembering.
+        # Caching a failure the same way would silently persist a false "no
+        # data" for up to _WITS_CACHE_TTL (7 days). So on failure we
+        # deliberately skip both caches, leaving this combo to be retried
+        # fresh next time it's requested -- later in this same run (another
+        # product needing the same market), or the next scheduled run --
+        # instead of every future lookup trusting a guess.
         logger.warning(f"WITS fetch failed for reporter {reporter} partner {partner} {year}: {exc}")
-        data = {}
+        time.sleep(0.5)
+        return {}
 
     _wits_cache[key] = data
     with _wits_disk_cache_lock:
