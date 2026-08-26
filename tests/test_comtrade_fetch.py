@@ -15,6 +15,28 @@ import pytest
 from etl import fetch
 
 
+@pytest.fixture(autouse=True)
+def _reset_qty_unit_cache():
+    """
+    _load_qty_unit_labels() caches its result in a module-level global for
+    the lifetime of the process (see etl/fetch.py) -- reset it around every
+    test so one test's mocked/failed getReference() call can't leak into
+    the next.
+    """
+    fetch._qty_unit_labels = None
+    yield
+    fetch._qty_unit_labels = None
+
+
+def _qtyunit_reference_df() -> pd.DataFrame:
+    """A trimmed stand-in for comtradeapicall.getReference('qtyunit')."""
+    return pd.DataFrame([
+        {"qtyCode": -1, "qtyAbbr": "N/A", "qtyDescription": "Not available or not specified or no quantity."},
+        {"qtyCode": 2, "qtyAbbr": "m²", "qtyDescription": "Area in square meters"},
+        {"qtyCode": 8, "qtyAbbr": "kg", "qtyDescription": "Weight in kilograms"},
+    ])
+
+
 def _raw_mirror_row(**overrides) -> dict:
     """One row shaped like a real Comtrade mirror-export API response."""
     row = {
@@ -44,6 +66,10 @@ class TestNormaliseMirror:
         assert row["trade_quantity"] == pytest.approx(10_000.0)
         assert row["net_weight_kg"] == pytest.approx(10_000.0)
         assert row["hs_code"] == "091020"
+        # qtyUnitAbbr is already a clean, non-blank string here -- resolved
+        # directly, no reference-table lookup needed (see TestResolveQuantityUnits
+        # for the far more common case where it comes back blank from Comtrade).
+        assert row["quantity_unit"] == "kg"
 
     def test_falls_back_to_period_when_ref_year_absent(self):
         df = pd.DataFrame([_raw_mirror_row(refYear=None, period=2023)]).drop(columns=["refYear"])
@@ -245,3 +271,157 @@ class TestFetchGlobalImports:
 
     def test_retries_twice_before_giving_up(self):
         assert fetch.fetch_global_imports.retry.stop.max_attempt_number == 2
+
+    def test_quantity_unit_resolved_from_code_when_abbr_blank(self, monkeypatch):
+        # The real-world case (see etl/fetch.py's _load_qty_unit_labels
+        # docstring): Comtrade returns qtyUnitCode but leaves qtyUnitAbbr
+        # blank, so the label has to come from a separate reference lookup.
+        rows = [{
+            "refYear": 2023, "reporterCode": "380", "partnerCode": "4",
+            "primaryValue": 100_000, "qtyUnitCode": 2, "qtyUnitAbbr": None,
+        }]
+        monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(fetch.comtradeapicall, "getFinalData", lambda **kw: pd.DataFrame(rows))
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+
+        result = fetch.fetch_global_imports("570210", [2023])
+        assert result.iloc[0]["quantity_unit"] == "m²"
+
+
+class TestResolveQuantityUnits:
+    """
+    _resolve_quantity_units() / _load_qty_unit_labels() -- the fix for
+    Comtrade's trade-flow API returning qtyUnitCode (numeric) but leaving
+    qtyUnitAbbr (text label) blank, confirmed empirically for Woven Carpets
+    (570210), Italy importing from Afghanistan, 2023.
+    """
+
+    def test_prefers_abbr_when_already_populated(self, monkeypatch):
+        # getReference must not even be called -- a populated qtyUnitAbbr
+        # is trusted as-is, no reference lookup needed.
+        def fail_if_called(*a, **kw):
+            raise AssertionError("getReference should not be called when qtyUnitAbbr is populated")
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", fail_if_called)
+
+        df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": "kg"}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] == "kg"
+
+    def test_falls_back_to_code_lookup_when_abbr_blank(self, monkeypatch):
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+        df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": None}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] == "m²"
+
+    def test_treats_empty_string_abbr_as_blank(self, monkeypatch):
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+        df = pd.DataFrame([{"qtyUnitCode": 8, "qtyUnitAbbr": "  "}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] == "kg"
+
+    def test_unknown_code_and_no_abbr_resolves_to_none(self, monkeypatch):
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+        df = pd.DataFrame([{"qtyUnitCode": 999, "qtyUnitAbbr": None}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] is None
+
+    def test_missing_columns_resolve_to_none(self):
+        df = pd.DataFrame([{"primaryValue": 100_000}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] is None
+
+    def test_reference_lookup_failure_does_not_raise(self, monkeypatch):
+        # A network/parsing failure fetching the reference table shouldn't
+        # take down the whole fetch -- resolve to None instead, same as an
+        # unrecognised code.
+        def raise_error(*a, **kw):
+            raise ConnectionError("boom")
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", raise_error)
+
+        df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": None}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] is None
+
+    def test_reference_table_fetched_only_once(self, monkeypatch):
+        calls = []
+        def counting_get_reference(*a, **kw):
+            calls.append(1)
+            return _qtyunit_reference_df()
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", counting_get_reference)
+
+        df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": None},
+                            {"qtyUnitCode": 8, "qtyUnitAbbr": None}])
+        fetch._resolve_quantity_units(df)
+        fetch._resolve_quantity_units(df)
+        assert len(calls) == 1
+
+    def test_excludes_not_available_sentinel(self, monkeypatch):
+        # qtyCode -1 ("N/A") is a real row in Comtrade's reference table, not
+        # a usable label -- it should resolve to None like any other blank.
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+        df = pd.DataFrame([{"qtyUnitCode": -1, "qtyUnitAbbr": None}])
+        result = fetch._resolve_quantity_units(df)
+        assert result.iloc[0] is None
+
+    def test_failed_fetch_is_not_cached_permanently(self, monkeypatch):
+        # A transient failure (e.g. a rate limit -- confirmed to happen in
+        # practice during a real multi-product ETL run) must not get
+        # remembered as "the labels are {}" for the rest of the process.
+        # The next call should get a fresh chance to fetch successfully,
+        # not be permanently stuck resolving every code to None.
+        monkeypatch.setattr(
+            fetch.comtradeapicall, "getReference",
+            lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("boom")),
+        )
+        df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": None}])
+        first = fetch._resolve_quantity_units(df)
+        assert first.iloc[0] is None
+
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", lambda *a, **kw: _qtyunit_reference_df())
+        second = fetch._resolve_quantity_units(df)
+        assert second.iloc[0] == "m²"
+
+    def test_concurrent_first_calls_do_not_duplicate_fetch(self, monkeypatch):
+        # Regression test for a real bug: etl/run.py fetches products
+        # concurrently (_PRODUCT_MAX_WORKERS in etl/run.py), so several
+        # threads can all see _qty_unit_labels is still None at once and
+        # race into _load_qty_unit_labels() together. Without the lock, an
+        # unsynchronised write from one racing thread (e.g. one that hit a
+        # rate limit and cached {}) could silently clobber another thread's
+        # good result for the rest of the process -- this happened for real
+        # (Knotted Carpets ended up with quantity_unit=None for every
+        # competitor row after a concurrent getReference() call elsewhere
+        # in the same run hit a 429). Line several threads up on a barrier
+        # so they all hit the None-check at the same instant, and assert
+        # getReference() only actually runs once.
+        import threading as th
+
+        call_count = {"n": 0}
+        count_lock = th.Lock()
+        start_barrier = th.Barrier(8)
+
+        def counting_get_reference(*a, **kw):
+            with count_lock:
+                call_count["n"] += 1
+            return _qtyunit_reference_df()
+
+        monkeypatch.setattr(fetch.comtradeapicall, "getReference", counting_get_reference)
+
+        results = []
+        results_lock = th.Lock()
+
+        def worker():
+            start_barrier.wait()
+            df = pd.DataFrame([{"qtyUnitCode": 2, "qtyUnitAbbr": None}])
+            value = fetch._resolve_quantity_units(df).iloc[0]
+            with results_lock:
+                results.append(value)
+
+        threads = [th.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert call_count["n"] == 1
+        assert results == ["m²"] * 8

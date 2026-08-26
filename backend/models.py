@@ -76,6 +76,7 @@ class CompetitorFlow(Base):
     supplier_name = Column(Text, nullable=False)
     trade_value_usd = Column(Numeric(20, 2))
     trade_quantity = Column(Numeric(20, 4))
+    quantity_unit = Column(Text)
 
     product = relationship("Product", back_populates="competitor_flows")
 

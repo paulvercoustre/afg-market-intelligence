@@ -102,14 +102,15 @@ def bulk_upsert_competitor_flows(engine: Engine, rows: list[dict]) -> int:
     sql = text("""
         INSERT INTO competitor_flows
             (product_id, market_code, year,
-             supplier_code, supplier_name, trade_value_usd, trade_quantity)
+             supplier_code, supplier_name, trade_value_usd, trade_quantity, quantity_unit)
         VALUES
             (:product_id, :market_code, :year,
-             :supplier_code, :supplier_name, :trade_value_usd, :trade_quantity)
+             :supplier_code, :supplier_name, :trade_value_usd, :trade_quantity, :quantity_unit)
         ON CONFLICT (product_id, market_code, supplier_code, year) DO UPDATE SET
             supplier_name   = EXCLUDED.supplier_name,
             trade_value_usd = EXCLUDED.trade_value_usd,
-            trade_quantity  = EXCLUDED.trade_quantity
+            trade_quantity  = EXCLUDED.trade_quantity,
+            quantity_unit   = EXCLUDED.quantity_unit
     """)
     with engine.begin() as conn:
         conn.execute(sql, rows)

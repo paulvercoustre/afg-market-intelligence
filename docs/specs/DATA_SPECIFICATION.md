@@ -357,7 +357,7 @@ Afghanistan's mirror export flows: one row per (product, importer, year).
 | `year` | INTEGER | NOT NULL | Trade year | Comtrade `refYear` |
 | `trade_value_usd` | NUMERIC(20,2) | Yes | Trade value, USD | Comtrade `primaryValue` |
 | `trade_quantity` | NUMERIC(20,4) | Yes | Quantity traded | Comtrade `qty` |
-| `quantity_unit` | TEXT | Yes | Unit of quantity | Comtrade `qtyUnitAbbr` |
+| `quantity_unit` | TEXT | Yes | Unit of quantity | Comtrade `qtyUnitAbbr`, resolved from `qtyUnitCode` against Comtrade's reference table when `qtyUnitAbbr` is blank (the common case) -- `etl/fetch.py`'s `_resolve_quantity_units()` |
 | `net_weight_kg` | NUMERIC(20,4) | Yes | Net weight, kg | Comtrade `netWgt` |
 | `fetched_at` | TIMESTAMPTZ | NOT NULL | ETL fetch timestamp | System |
 
@@ -379,6 +379,7 @@ Supplier countries exporting a product to a given market.
 | `supplier_name` | TEXT | NOT NULL | Exporting country name | Comtrade `partnerDesc` |
 | `trade_value_usd` | NUMERIC(20,2) | Yes | Import value from this supplier, USD | Comtrade `primaryValue` |
 | `trade_quantity` | NUMERIC(20,4) | Yes | Quantity | Comtrade `qty` |
+| `quantity_unit` | TEXT | Yes | Unit of quantity | Same resolution as `trade_flows.quantity_unit` above |
 
 **Unique key:** (`product_id`, `market_code`, `supplier_code`, `year`).
 

@@ -186,6 +186,7 @@ def fetch_global_imports(hs_code: str, years: list[int]) -> pd.DataFrame:
 
     raw["reporterCode"] = raw["reporterCode"].astype(str)
     raw["partnerCode"] = raw["partnerCode"].astype(str)
+    raw["quantity_unit"] = _resolve_quantity_units(raw)
 
     return raw[raw["year"].isin(years)].copy()
 
@@ -627,6 +628,85 @@ def fetch_tariff_rates(market_codes: list[str], hs_codes: list[str],
     return rows
 
 
+# ── Quantity-unit reference (qtyUnitCode -> label) ─────────────────────────────
+# Comtrade's trade-flow API (getFinalData) reliably returns qtyUnitCode (a
+# numeric code, e.g. 2) but leaves qtyUnitAbbr (the text label, e.g. "m2")
+# blank in practice -- confirmed empirically: Woven Carpets (570210), Italy
+# importing from Afghanistan, 2023 returns qtyUnitCode=2, qtyUnitAbbr=None,
+# even though Comtrade's own website displays "m2" for that same row. The
+# text label lives in a separate reference dataset (comtradeapicall's
+# 'qtyunit' category, no subscription key needed) that the website resolves
+# client-side but the bulk API does not -- so we fetch and cache that lookup
+# table ourselves. Unlike the WITS tariff cache this is small (~40 rows) and
+# effectively static, so an in-process cache (refetched once per run) is
+# enough -- no disk persistence needed.
+#
+# Products are fetched concurrently (_PRODUCT_MAX_WORKERS in etl/run.py), so
+# the first call from *each* worker thread can race to populate this cache
+# at once -- confirmed to happen in practice (a getReference() call from one
+# thread hit Comtrade's rate limit while others were in flight). A lock plus
+# a double-checked None-check avoids redundant concurrent fetches; failures
+# are deliberately *not* written to the cache (same reasoning as the WITS
+# disk cache) -- caching a transient 429 as "the labels are {}" would
+# silently and permanently blank out unit resolution for every product
+# processed afterward in that run, not just the one that hit the limit.
+_qty_unit_labels: dict[str, str] | None = None
+_qty_unit_labels_lock = threading.Lock()
+
+
+def _load_qty_unit_labels() -> dict[str, str]:
+    global _qty_unit_labels
+    if _qty_unit_labels is not None:
+        return _qty_unit_labels
+    with _qty_unit_labels_lock:
+        if _qty_unit_labels is not None:  # another thread just finished while we waited
+            return _qty_unit_labels
+        try:
+            ref = comtradeapicall.getReference("qtyunit")
+            labels = {
+                str(int(row["qtyCode"])): row["qtyAbbr"]
+                for row in ref.to_dict("records")
+                if row.get("qtyAbbr") and str(row["qtyAbbr"]).strip().upper() != "N/A"
+            }
+        except Exception as exc:
+            logger.warning(f"Failed to fetch Comtrade quantity-unit reference table: {exc}")
+            return {}
+        _qty_unit_labels = labels
+        return _qty_unit_labels
+
+
+def _resolve_quantity_units(df: pd.DataFrame) -> pd.Series:
+    """
+    Resolve a display label per row, preferring qtyUnitAbbr on the rare
+    chance the API does populate it directly, falling back to a lookup of
+    qtyUnitCode against the reference table otherwise (the common case).
+
+    Built as a plain Python list rather than chained vectorised pandas ops
+    (.apply().combine_first()) deliberately: a per-row result that's mostly
+    real strings with a handful of None gaps gets inferred by pandas as its
+    dedicated string extension dtype, which silently represents those None
+    gaps as NaN instead -- and a float NaN landing in a Postgres TEXT column
+    doesn't become SQL NULL, it gets adapted to the literal string "NaN"
+    (confirmed empirically: 30/1994 competitor_flows rows for Woven Carpets
+    ended up with quantity_unit = 'NaN' before this was written as a plain
+    list with an explicit object dtype instead).
+    """
+    def _resolve_one(abbr, code) -> str | None:
+        if isinstance(abbr, str) and abbr.strip():
+            return abbr
+        if code is None or (isinstance(code, float) and pd.isna(code)):
+            return None
+        try:
+            return _load_qty_unit_labels().get(str(int(float(code))))
+        except (TypeError, ValueError):
+            return None
+
+    abbrs = df["qtyUnitAbbr"] if "qtyUnitAbbr" in df.columns else [None] * len(df)
+    codes = df["qtyUnitCode"] if "qtyUnitCode" in df.columns else [None] * len(df)
+    values = [_resolve_one(a, c) for a, c in zip(abbrs, codes)]
+    return pd.Series(values, index=df.index, dtype=object)
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _normalise_mirror(df: pd.DataFrame, hs_code: str) -> pd.DataFrame:
@@ -666,10 +746,7 @@ def _normalise_mirror(df: pd.DataFrame, hs_code: str) -> pd.DataFrame:
     else:
         out["trade_quantity"] = None
 
-    if "qtyUnitAbbr" in df.columns:
-        out["quantity_unit"] = df["qtyUnitAbbr"]
-    else:
-        out["quantity_unit"] = None
+    out["quantity_unit"] = _resolve_quantity_units(df)
 
     # Net weight
     if "netWgt" in df.columns:

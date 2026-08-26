@@ -94,6 +94,7 @@ def to_competitor_flows(global_df: pd.DataFrame, product_id: int, market_codes: 
             "supplier_name": supplier_name,
             "trade_value_usd": _float_or_none(r.get("primaryValue")),
             "trade_quantity": qty,
+            "quantity_unit": r.get("quantity_unit"),
         })
     return rows
 

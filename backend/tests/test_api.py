@@ -104,6 +104,7 @@ def create_tables():
                 supplier_name TEXT NOT NULL,
                 trade_value_usd REAL,
                 trade_quantity REAL,
+                quantity_unit TEXT,
                 UNIQUE(product_id, market_code, supplier_code, year)
             )
         """))

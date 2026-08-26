@@ -61,6 +61,26 @@ class TestToCompetitorFlows:
     def test_empty_input(self):
         assert to_competitor_flows(pd.DataFrame(), PRODUCT_ID, ["699"]) == []
 
+    def test_passes_through_quantity_unit(self):
+        # quantity_unit is resolved upstream in etl/fetch.py
+        # (_resolve_quantity_units) and attached directly to global_df --
+        # to_competitor_flows just needs to carry it into the row dict
+        # unchanged, same as it already does for trade_value_usd/trade_quantity.
+        df = pd.DataFrame([{
+            "reporterCode": "699", "partnerCode": "004", "year": 2024,
+            "primaryValue": 200_000, "qty": 20_000, "quantity_unit": "m²",
+        }])
+        rows = to_competitor_flows(df, PRODUCT_ID, ["699"])
+        assert rows[0]["quantity_unit"] == "m²"
+
+    def test_missing_quantity_unit_column_is_none(self):
+        df = pd.DataFrame([{
+            "reporterCode": "699", "partnerCode": "004", "year": 2024,
+            "primaryValue": 200_000, "qty": 20_000,
+        }])
+        rows = to_competitor_flows(df, PRODUCT_ID, ["699"])
+        assert rows[0]["quantity_unit"] is None
+
 
 class TestGrowthMetrics:
     def test_full_growth(self):

@@ -122,6 +122,7 @@ class TestBulkUpsertCompetitorFlows:
             "product_id": product_id, "market_code": "699", "year": 2024,
             "supplier_code": "004", "supplier_name": None,
             "trade_value_usd": 200_000, "trade_quantity": 20_000,
+            "quantity_unit": "kg",
         }
         load.bulk_upsert_competitor_flows(pg_engine, [row])
         load.bulk_upsert_competitor_flows(pg_engine, [{**row, "trade_value_usd": 250_000}])
