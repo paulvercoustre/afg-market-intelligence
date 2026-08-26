@@ -76,6 +76,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,  # _price_competitiveness() now uses netWgt only
         })
 
     # Suppliers to market 586 in 2024
@@ -91,6 +92,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,
         })
 
     # Suppliers to market 842 in 2024 — Afghanistan priced below market average
@@ -107,6 +109,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,
         })
 
     return pd.DataFrame(rows)

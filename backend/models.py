@@ -104,6 +104,7 @@ class Indicator(Base):
     market_share_pct = Column(Numeric(10, 6))
     afg_supplier_rank = Column(Integer)
     unit_price_usd = Column(Numeric(20, 6))
+    price_basis = Column(Text)  # "kg" (net_weight_kg) or a native unit from config.NATIVE_UNIT_PRICE_BASES, e.g. "m²"
     market_avg_price_usd = Column(Numeric(20, 6))
     price_vs_market_pct = Column(Numeric(10, 4))
     price_competitiveness = Column(Text)

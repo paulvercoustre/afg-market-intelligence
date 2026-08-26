@@ -128,6 +128,7 @@ def create_tables():
                 market_share_pct REAL,
                 afg_supplier_rank INTEGER,
                 unit_price_usd REAL,
+                price_basis TEXT,
                 market_avg_price_usd REAL,
                 price_vs_market_pct REAL,
                 price_competitiveness TEXT,
@@ -352,6 +353,7 @@ class TestProductDetail:
             assert "yoy_growth_pct" in m["growth"]
             assert "cagr_pct" in m["growth"]
             assert "unit_price_usd" in m["price"]
+            assert "price_basis" in m["price"]
 
 
 class TestMarketDetail:

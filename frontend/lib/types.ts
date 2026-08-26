@@ -75,6 +75,7 @@ export interface GrowthMetrics {
 
 export interface PriceMetrics {
   unit_price_usd: number | null
+  price_basis: string | null
   market_avg_price_usd: number | null
   price_vs_market_pct: number | null
   price_competitiveness: string | null

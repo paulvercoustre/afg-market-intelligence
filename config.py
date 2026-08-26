@@ -45,6 +45,39 @@ OPPORTUNITY_SCORE_WEIGHTS = {
 # 0% → 100, 10% → 70, 20% → 40, 33%+ → 0  (linear: score = max(0, 100 - rate * 3))
 TARIFF_SCORE_PER_PCT = 3.0
 
+# Outlier band for cross-supplier unit-price comparison in
+# _price_competitiveness() (etl/transform.py): a supplier's implied unit
+# price is excluded from market_avg_price_usd if it falls outside
+# [median / PRICE_OUTLIER_BAND_MULTIPLIER, median * PRICE_OUTLIER_BAND_MULTIPLIER].
+# Same band CEPII uses when cleaning raw Comtrade unit values for the same
+# reason (mismatched quantity units across reporters) -- see Berthou &
+# Emlinger, "The Trade Unit Values Database", CEPII Working Paper 2011-10,
+# §2.3 and Appendix A2. Named here (not inlined) so its sensitivity can be
+# tested directly -- see TestPriceOutlierBandRobustness in
+# etl/tests/test_transform.py.
+PRICE_OUTLIER_BAND_MULTIPLIER = 10.0
+
+# Reported quantity units (etl/fetch.py's Comtrade qtyUnitCode resolution)
+# that are a genuinely different, more economically meaningful price basis
+# than net_weight_kg -- not just weight at a different scale. Validated
+# empirically (2026-08) across all 38 products: within every product, when
+# *any* supplier reports a unit at all, every supplier that does agrees on
+# the same one -- so per-product consistency doesn't need to be computed at
+# query time, just gated on the unit being one of these types. "carat"
+# (Lapis Lazuli, worked) was deliberately left out despite being just as
+# consistent -- it's still a weight unit, proportional to kg by a fixed
+# 5000:1 factor, so using it wouldn't change the price signal, only add a
+# second, redundant weight-basis path.
+#   m² -- Woven Carpets, Knotted Carpets: carpets are naturally priced by
+#         area, not weight.
+#   u  -- Cashmere Sweaters: finished garments are naturally priced per
+#         piece, not weight.
+# _unit_price() and _price_competitiveness() (etl/transform.py) use this
+# only when EVERY row on the relevant side (Afghanistan's own flow, or a
+# given competitor) reports the exact same one of these units -- otherwise
+# they fall back to net_weight_kg exactly as before.
+NATIVE_UNIT_PRICE_BASES = {"m²", "u"}
+
 # Distance scoring reference ceiling: the greatest possible great-circle
 # distance between two points on Earth (antipodal, ~half the circumference).
 # Used to log-normalise score_distance -- gravity-model trade literature

@@ -247,6 +247,7 @@ def _indicator_to_schema(ind: Indicator, market: Market | None) -> schemas.Marke
         ),
         price=schemas.PriceMetrics(
             unit_price_usd=_f(ind.unit_price_usd),
+            price_basis=ind.price_basis,
             market_avg_price_usd=_f(ind.market_avg_price_usd),
             price_vs_market_pct=_f(ind.price_vs_market_pct),
             price_competitiveness=ind.price_competitiveness,

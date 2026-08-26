@@ -6,6 +6,20 @@ import ScoreBadge from '@/components/ScoreBadge'
 import ScoreBar from '@/components/ScoreBar'
 import NextSteps from '@/components/NextSteps'
 
+// Display label per config.NATIVE_UNIT_PRICE_BASES value (falls back to the
+// raw basis string for anything not listed, e.g. a future addition there).
+const PRICE_BASIS_LABELS: Record<string, string> = {
+  kg: 'kg',
+  'm²': 'm²',
+  u: 'piece',
+}
+
+function formatUnitPrice(value: number | null, basis: string | null): string {
+  const formatted = formatUSD(value, false)
+  if (value == null || !basis) return formatted
+  return `${formatted} /${PRICE_BASIS_LABELS[basis] ?? basis}`
+}
+
 const SCORE_DIMENSIONS = [
   { key: 'market_size', label: 'Market size', weight: 0.20 },
   { key: 'market_growth', label: 'Market growth', weight: 0.18 },
@@ -153,11 +167,11 @@ export default async function MarketProfilePage(
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <StatCard
                     label="Afghan unit price"
-                    value={formatUSD(profile.trade.price.unit_price_usd, false)}
+                    value={formatUnitPrice(profile.trade.price.unit_price_usd, profile.trade.price.price_basis)}
                   />
                   <StatCard
                     label="Market avg price"
-                    value={formatUSD(profile.trade.price.market_avg_price_usd, false)}
+                    value={formatUnitPrice(profile.trade.price.market_avg_price_usd, profile.trade.price.price_basis)}
                   />
                   <StatCard
                     label="vs market avg"
@@ -166,9 +180,21 @@ export default async function MarketProfilePage(
                   <StatCard
                     label="Competitiveness"
                     value={profile.trade.price.price_competitiveness ?? '—'}
-                    highlight
+                    sub={
+                      profile.trade.price.price_competitiveness == null
+                        ? 'No unit data for comparison'
+                        : undefined
+                    }
+                    highlight={profile.trade.price.price_competitiveness != null}
                   />
                 </div>
+                {profile.trade.price.price_competitiveness == null && (
+                  <p className="text-[11px] text-gray-400 italic mt-2">
+                    Afghanistan or its competitors didn't report a comparable weight-based unit
+                    price for this market — price competitiveness isn't factored into the
+                    opportunity score for this row (treated as neutral).
+                  </p>
+                )}
               </div>
             </Section>
           )}

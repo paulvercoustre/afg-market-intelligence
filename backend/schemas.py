@@ -53,6 +53,7 @@ class GrowthMetrics(BaseModel):
 
 class PriceMetrics(BaseModel):
     unit_price_usd: float | None
+    price_basis: str | None  # "kg" or a native unit, e.g. "m²" -- see config.NATIVE_UNIT_PRICE_BASES
     market_avg_price_usd: float | None
     price_vs_market_pct: float | None
     price_competitiveness: str | None

@@ -19,8 +19,10 @@ from config import (
     LANGUAGE_SIMILARITY,
     LANGUAGE_SIMILARITY_DEFAULT,
     MAX_GREAT_CIRCLE_DISTANCE_KM,
+    NATIVE_UNIT_PRICE_BASES,
     OPPORTUNITY_SCORE_WEIGHTS,
     PRICE_COMPETITIVENESS,
+    PRICE_OUTLIER_BAND_MULTIPLIER,
     TARIFF_SCORE_PER_PCT,
 )
 
@@ -164,12 +166,17 @@ def compute_indicators(
         # Afghanistan's rank among all suppliers to this market
         afg_rank = _afg_rank(global_df, market_code, afg_value_latest, trade_data_year)
 
-        # Unit price
-        unit_price = _unit_price(afg_to_market, trade_data_year)
+        # Unit price -- basis is net_weight_kg unless every one of
+        # Afghanistan's own rows for this year agrees on one of
+        # NATIVE_UNIT_PRICE_BASES (see config.py), e.g. carpets priced by m²
+        unit_price, price_basis = _unit_price(afg_to_market, trade_data_year)
 
-        # Market average price and competitiveness
+        # Market average price and competitiveness -- computed on the SAME
+        # basis as unit_price, so the comparison is apples-to-apples; a
+        # competitor that doesn't share that basis is excluded rather than
+        # silently mixed in on a different unit.
         market_avg_price, price_vs_market_pct, competitiveness = _price_competitiveness(
-            global_df, market_code, unit_price, trade_data_year
+            global_df, market_code, unit_price, price_basis, trade_data_year
         )
 
         rows.append({
@@ -190,6 +197,7 @@ def compute_indicators(
             "market_share_pct": _float_or_none(market_share_pct),
             "afg_supplier_rank": afg_rank,
             "unit_price_usd": _float_or_none(unit_price),
+            "price_basis": price_basis,
             "market_avg_price_usd": _float_or_none(market_avg_price),
             "price_vs_market_pct": _float_or_none(price_vs_market_pct),
             "price_competitiveness": competitiveness,
@@ -348,28 +356,67 @@ def _afg_rank(global_df: pd.DataFrame, market_code: str,
     return int(higher) + 1
 
 
-def _unit_price(afg_df: pd.DataFrame, year: int) -> float | None:
+def _native_unit_basis(sub: pd.DataFrame) -> str | None:
+    """
+    Returns the single unit every row in `sub` agrees on, if it's one of
+    NATIVE_UNIT_PRICE_BASES (config.py) -- e.g. carpets reported in m² --
+    else None. Requires unanimous agreement: a product/market/year where
+    even one row reports a different (or missing) unit falls back to
+    net_weight_kg rather than risk mixing bases.
+    """
+    units = sub.get("quantity_unit", pd.Series(dtype=object)).dropna().unique()
+    if len(units) == 1 and units[0] in NATIVE_UNIT_PRICE_BASES:
+        return units[0]
+    return None
+
+
+def _unit_price(afg_df: pd.DataFrame, year: int) -> tuple[float | None, str | None]:
+    """
+    Returns (price_per_unit, basis) where basis is either one of
+    NATIVE_UNIT_PRICE_BASES (e.g. "m²") or "kg" (net_weight_kg), or
+    (None, None) if no price could be computed on either basis.
+    """
     sub = afg_df[afg_df["year"] == year]
     if sub.empty:
-        return None
+        return None, None
     value = pd.to_numeric(sub["trade_value_usd"], errors="coerce").sum()
-    qty = pd.to_numeric(sub.get("trade_quantity", pd.Series(dtype=float)), errors="coerce").sum()
-    if qty and qty > 0:
-        return float(value / qty)
-    # Fall back to net weight
+
+    native_unit = _native_unit_basis(sub)
+    if native_unit is not None:
+        qty = pd.to_numeric(sub.get("trade_quantity", pd.Series(dtype=float)), errors="coerce").sum()
+        if qty and qty > 0:
+            return float(value / qty), native_unit
+
+    # net_weight_kg fallback -- deliberately NO fallback to the free-form
+    # "quantity" field beyond the NATIVE_UNIT_PRICE_BASES allowlist above
+    # (kg, m^2, pieces, ... depending on the reporter, with no reliable unit
+    # label in the general case). A blanket fallback would silently
+    # reintroduce the cross-country unit mismatch this is meant to prevent
+    # (see DATA_SPECIFICATION.md §4.5 and Berthou & Emlinger, "The Trade
+    # Unit Values Database", CEPII Working Paper 2011-10, §2.2). Better to
+    # leave the price comparison undetermined -- None propagates through
+    # _price_competitiveness() and surfaces as "no unit data for comparison"
+    # in the UI -- than to compute one on a basis we can't verify.
     wt = pd.to_numeric(sub.get("net_weight_kg", pd.Series(dtype=float)), errors="coerce").sum()
     if wt and wt > 0:
-        return float(value / wt)
-    return None
+        return float(value / wt), "kg"
+    return None, None
 
 
 def _price_competitiveness(
     global_df: pd.DataFrame,
     market_code: str,
     afg_price: float | None,
+    afg_basis: str | None,
     year: int,
 ) -> tuple[float | None, float | None, str | None]:
-    if afg_price is None or global_df.empty:
+    """
+    afg_basis (from _unit_price()) is either "kg" or one of
+    NATIVE_UNIT_PRICE_BASES -- competitor prices are computed on that SAME
+    basis, so the comparison stays apples-to-apples. A competitor reporting
+    a different (or no) unit is excluded rather than silently mixed in.
+    """
+    if afg_price is None or afg_basis is None or global_df.empty:
         return None, None, None
 
     suppliers = global_df[
@@ -381,15 +428,52 @@ def _price_competitiveness(
         return None, None, None
 
     suppliers["_val"] = pd.to_numeric(suppliers["primaryValue"], errors="coerce")
-    suppliers["_qty"] = pd.to_numeric(
-        suppliers.get("qty", pd.Series(dtype=float)), errors="coerce"
-    )
-    suppliers["_price"] = suppliers.apply(
-        lambda r: r["_val"] / r["_qty"] if r["_qty"] > 0 else None, axis=1
-    )
-    valid = suppliers["_price"].dropna()
+
+    if afg_basis in NATIVE_UNIT_PRICE_BASES:
+        on_basis = suppliers[suppliers.get("quantity_unit") == afg_basis].copy()
+        on_basis["_qty"] = pd.to_numeric(on_basis.get("qty", pd.Series(dtype=float)), errors="coerce")
+        on_basis["_price"] = on_basis.apply(
+            lambda r: r["_val"] / r["_qty"] if r["_qty"] > 0 else None, axis=1
+        )
+        valid = on_basis["_price"].dropna()
+    else:
+        # Net weight (kg) only -- same reasoning as _unit_price(): no fallback
+        # to the free-form "quantity" field. A supplier that didn't report
+        # net weight is excluded from the comparison entirely (its _price
+        # stays None and gets dropped below) rather than being included on a
+        # potentially incompatible unit basis.
+        suppliers["_wt"] = pd.to_numeric(
+            suppliers.get("netWgt", pd.Series(dtype=float)), errors="coerce"
+        )
+        suppliers["_price"] = suppliers.apply(
+            lambda r: r["_val"] / r["_wt"] if r["_wt"] > 0 else None, axis=1
+        )
+        valid = suppliers["_price"].dropna()
+
     if valid.empty:
         return None, None, None
+
+    # Comtrade lets each reporter submit "quantity" in whatever unit its own
+    # customs system uses (kg, m^2, pieces, ...) with no reliable unit label
+    # (qtyUnitAbbr is frequently blank) -- so dividing value/quantity across
+    # suppliers can silently mix incompatible units, producing wild implied
+    # "prices" that are really just unit mismatches (e.g. one HS6 code, one
+    # market, one year: $11/unit to $5,834/unit across suppliers). We can't
+    # recover the true unit, but a unit-mismatched supplier is a stark outlier
+    # against the rest, who are more likely reporting comparably -- so filter
+    # by distance from the median before averaging, the same outlier band
+    # CEPII uses when cleaning raw Comtrade data for this exact reason (an
+    # observation is dropped if it exceeds median*10 or is below median/10;
+    # see Berthou & Emlinger, "The Trade Unit Values Database", CEPII Working
+    # Paper 2011-10, Appendix A2).
+    median_price = float(valid.median())
+    if median_price > 0:
+        filtered = valid[
+            (valid >= median_price / PRICE_OUTLIER_BAND_MULTIPLIER)
+            & (valid <= median_price * PRICE_OUTLIER_BAND_MULTIPLIER)
+        ]
+        if not filtered.empty:
+            valid = filtered
 
     market_avg = float(valid.mean())
     pct_diff = (afg_price - market_avg) / market_avg * 100 if market_avg > 0 else None

@@ -244,6 +244,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
             },
             "price": {
                 "unit_price_usd": _f(row["unit_price_usd"]),
+                "price_basis": row["price_basis"],
                 "market_avg_price_usd": _f(row["market_avg_price_usd"]),
                 "price_vs_market_pct": _f(row["price_vs_market_pct"]),
                 "price_competitiveness": row["price_competitiveness"],
