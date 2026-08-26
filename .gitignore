@@ -64,3 +64,10 @@ frontend/out/
 # CC BY-NC-ND). See reference/build_language_reference.py for the citation.
 reference/A_Dataset_on_Linguistic_Connectivity_Across_and_Wi.pdf
 
+# Third-party copyrighted reference PDF -- same reasoning as above, kept
+# locally for reference only, not re-hosted in the repo.
+docs/OECD Handbook on Constructing Composite Indicators.pdf
+
+# Local working file, not meant for the repo.
+docs/INDICATOR_INVENTORY.xlsx
+
