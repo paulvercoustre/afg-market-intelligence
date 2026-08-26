@@ -190,8 +190,8 @@ export default async function MarketProfilePage(
                 </div>
                 {profile.trade.price.price_competitiveness == null && (
                   <p className="text-[11px] text-gray-400 italic mt-2">
-                    Afghanistan or its competitors didn't report a comparable weight-based unit
-                    price for this market — price competitiveness isn't factored into the
+                    Afghanistan or its competitors didn&apos;t report a comparable weight-based unit
+                    price for this market — price competitiveness isn&apos;t factored into the
                     opportunity score for this row (treated as neutral).
                   </p>
                 )}
