@@ -1,7 +1,15 @@
-"""Shared pandas fixtures for ETL transform tests."""
+"""Shared pandas fixtures for ETL transform tests, plus real-Postgres fixtures
+used by any test that needs to exercise etl/load.py's actual upsert SQL
+(etl/tests/test_load.py, etl/tests/test_pipeline_integration.py)."""
+
+import os
+from pathlib import Path
 
 import pandas as pd
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, text
 
 PRODUCT_ID = 1
 YEARS = [2022, 2023, 2024]
@@ -68,6 +76,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,  # _price_competitiveness() now uses netWgt only
         })
 
     # Suppliers to market 586 in 2024
@@ -83,6 +92,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,
         })
 
     # Suppliers to market 842 in 2024 — Afghanistan priced below market average
@@ -99,6 +109,7 @@ def global_df() -> pd.DataFrame:
             "primaryValue": value,
             "partnerDesc": partner_name,
             "qty": qty,
+            "netWgt": qty,
         })
 
     return pd.DataFrame(rows)
@@ -117,3 +128,62 @@ def sample_indicator_row() -> dict:
         "price_competitiveness": "Competitive",
         "afg_supplier_rank": 3,
     }
+
+
+# ── Real-Postgres fixtures ──────────────────────────────────────────────────
+# Any test that requests pg_engine (directly, or transitively via clean_tables
+# / product_id) is auto-skipped unless TEST_DATABASE_URL is set -- see
+# etl/tests/test_load.py's module docstring for how to run these locally.
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="session")
+def pg_engine():
+    """Real Postgres engine, migrated to head once per test session."""
+    if not TEST_DATABASE_URL:
+        pytest.skip("TEST_DATABASE_URL not set -- see etl/tests/test_load.py to run locally")
+
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    cfg.set_main_option("path_separator", "os")
+    cfg.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    # migrations/env.py prefers the DATABASE_URL env var over sqlalchemy.url
+    # when it's set -- scope the override to just this call so it can't leak
+    # into anything else that reads DATABASE_URL during the test session.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("DATABASE_URL", TEST_DATABASE_URL)
+        command.upgrade(cfg, "head")
+
+    engine = create_engine(TEST_DATABASE_URL, pool_pre_ping=True)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def clean_tables(request):
+    """
+    Start every test with empty tables, regardless of what a previous run
+    left behind. Only truncates for tests that actually use pg_engine --
+    autouse here means "always run for tests in this directory that request
+    it," not "always touch Postgres" (fixturenames check below skips the
+    truncate, and therefore the pg_engine skip-if-unconfigured, for every
+    other test).
+    """
+    if "pg_engine" not in request.fixturenames:
+        yield
+        return
+    pg_engine = request.getfixturevalue("pg_engine")
+    with pg_engine.begin() as conn:
+        conn.execute(text(
+            "TRUNCATE products, markets, market_context, trade_flows, "
+            "competitor_flows, indicators, pipeline_runs RESTART IDENTITY CASCADE"
+        ))
+    yield
+
+
+@pytest.fixture
+def product_id(pg_engine) -> int:
+    from etl import load
+    return load.upsert_product(pg_engine, "Test Saffron", "Spices & Herbs", ["091020"], "test product")

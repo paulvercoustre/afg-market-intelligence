@@ -234,6 +234,9 @@ def _indicator_to_schema(ind: Indicator, market: Market | None) -> schemas.Marke
         global_market_size_usd=_f(ind.global_market_size_usd),
         market_share_pct=_f(ind.market_share_pct),
         afg_supplier_rank=ind.afg_supplier_rank,
+        trade_data_year=ind.trade_data_year,
+        afg_last_export_year=ind.afg_last_export_year,
+        afg_last_export_value_usd=_f(ind.afg_last_export_value_usd),
         growth=schemas.GrowthMetrics(
             yoy_growth_pct=_f(ind.yoy_growth_pct),
             cagr_pct=_f(ind.cagr_pct),
@@ -244,6 +247,7 @@ def _indicator_to_schema(ind: Indicator, market: Market | None) -> schemas.Marke
         ),
         price=schemas.PriceMetrics(
             unit_price_usd=_f(ind.unit_price_usd),
+            price_basis=ind.price_basis,
             market_avg_price_usd=_f(ind.market_avg_price_usd),
             price_vs_market_pct=_f(ind.price_vs_market_pct),
             price_competitiveness=ind.price_competitiveness,

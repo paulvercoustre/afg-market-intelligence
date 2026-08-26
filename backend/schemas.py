@@ -53,6 +53,7 @@ class GrowthMetrics(BaseModel):
 
 class PriceMetrics(BaseModel):
     unit_price_usd: float | None
+    price_basis: str | None  # "kg" or a native unit, e.g. "m²" -- see config.NATIVE_UNIT_PRICE_BASES
     market_avg_price_usd: float | None
     price_vs_market_pct: float | None
     price_competitiveness: str | None
@@ -65,6 +66,9 @@ class MarketIndicator(BaseModel):
     global_market_size_usd: float | None
     market_share_pct: float | None
     afg_supplier_rank: int | None
+    trade_data_year: int | None = None
+    afg_last_export_year: int | None = None
+    afg_last_export_value_usd: float | None = None
     growth: GrowthMetrics
     price: PriceMetrics
 
@@ -141,10 +145,14 @@ class ScoreBreakdown(BaseModel):
 class MarketContextData(BaseModel):
     gdp_per_capita_usd: float | None
     lpi_score: float | None
+    lpi_score_year: int | None = None
     regulatory_quality: float | None
+    regulatory_quality_year: int | None = None
     political_stability: float | None
+    political_stability_year: int | None = None
     tariff_rate_pct: float | None = None
     tariff_indicator: str | None = None
+    tariff_year: int | None = None
 
 
 class MarketOpportunity(BaseModel):
@@ -162,6 +170,9 @@ class MarketOpportunity(BaseModel):
     has_fta: bool | None
     language_similarity: float | None
     tariff_rate_pct: float | None = None
+    trade_data_year: int | None = None
+    afg_last_export_year: int | None = None
+    afg_last_export_value_usd: float | None = None
     score_breakdown: ScoreBreakdown
     context: MarketContextData
 
@@ -188,6 +199,7 @@ class MarketProfile(BaseModel):
     product_name: str | None
     market_code: str
     market_name: str | None
+    computed_for_year: int | None = None
     opportunity_score: float | None
     score_breakdown: ScoreBreakdown
     context: MarketContextData

@@ -90,7 +90,7 @@ Sources from the scoping note are classified into three tiers based on current i
 
 **Granularity:** 6-digit HS code, annual, bilateral (reporter × partner).
 
-**Years covered:** 2021–2024 (configurable in `config.py` → `YEARS`).
+**Years covered:** 2021–2025 (configurable in `config.py` → `YEARS`). Requested directly per year; a given year can return empty if a reporter hasn't submitted data to Comtrade yet.
 
 ---
 
@@ -101,7 +101,7 @@ Sources from the scoping note are classified into three tiers based on current i
 | **Provider** | World Bank |
 | **API** | Yes — REST `https://api.worldbank.org/v2` |
 | **Access** | No key required |
-| **Rate limits** | Gentle throttling (`time.sleep(0.2)` between countries) |
+| **Rate limits** | Gentle throttling (`time.sleep(0.2)` between countries); 60s request timeout per 20-country batch (raised from 30s — see Known Issues below) |
 | **Licensing** | Open data; attribution required |
 | **Cost** | Free |
 | **Refresh cadence** | Monthly (with ETL) |
@@ -119,7 +119,12 @@ Sources from the scoping note are classified into three tiers based on current i
 
 **Granularity:** Country (ISO-3), annual.
 
-**Storage:** `market_context` table, keyed by ISO-3 `country_code`.
+**Storage:** `market_context` table, keyed by ISO-3 `country_code` — every field keeps its own year here.
+
+**Year resolution on `indicators` (denormalised copy):** `lpi_score`, `regulatory_quality`, and `political_stability` are not published annually without gaps (LPI is triennial, WGI lags 1–2 years), so `_latest_wb_context()` resolves each field *independently* to the latest year ≤ `computed_for_year` with a non-null value. `indicators.lpi_score_year`, `regulatory_quality_year`, and `political_stability_year` (migration 0005) record which year each resolved value actually came from. `gdp_per_capita_usd` has no equivalent `_year` column — it publishes annually with no structural gaps, so a `NULL` there indicates a fetch failure, not a data gap (see Known Issues).
+
+**Known issues:**
+- A 30s per-batch timeout (fixed in migration-adjacent code change, 2026-08-05) was silently dropping `gdp_per_capita_usd` for entire 20-country batches on slow responses — confirmed via `etl_run.log` showing repeated `Read timed out` warnings for `NY.GDP.PCAP.CD` chunks including major economies (China, India, Germany, UK, France, Turkey). Raised to 60s. A stale run predating this fix may still have `NULL` `gdp_per_capita_usd` for affected countries until the ETL is re-run.
 
 ---
 
@@ -145,11 +150,11 @@ with UN numeric country codes):
 | `AHS` | `004` (Afghanistan) | Effectively applied tariff, simple average (preferential where a scheme exists) | First |
 | `MFN` | `000` (World) | Most-Favoured Nation tariff, simple average | Fallback |
 
-**Strategy:** Per market, for each year (descending), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade.
+**Strategy:** Per market, for each year (descending, 2025 → 2021), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade, so the year that actually yields data is often earlier than the latest year requested.
 
 **Granularity:** 6-digit HS code, country (UN numeric code), annual.
 
-**Storage:** Denormalised into `indicators.tariff_rate_pct` and `indicators.tariff_indicator`.
+**Storage:** Denormalised into `indicators.tariff_rate_pct`, `indicators.tariff_indicator`, and `indicators.tariff_year` (migration 0004) — the last one records the actual year WITS reported the stored rate for, since it can differ from the row's `computed_for_year`.
 
 ---
 
@@ -157,13 +162,14 @@ with UN numeric country codes):
 
 | Lookup | Keyed by | Purpose | Provenance |
 |---|---|---|---|
-| `DISTANCE_FROM_KABUL_KM` | Comtrade numeric country code | Proximity scoring | Approximate straight-line km; manual compilation |
-| `LANGUAGE_SIMILARITY` | Comtrade numeric country code | Language/cultural scoring (0.0–1.0) | Expert judgment based on Dari/Pashto mutual intelligibility |
-| `FTA_STATUS` | Comtrade numeric country code | Preferential access flag | Afghanistan memberships: SAPTA, ECO, EU/UK GSP+ |
+| `DISTANCE_FROM_KABUL_KM` | Comtrade numeric country code | Proximity scoring | Great-circle capital-to-capital km from CEPII GeoDist (Mayer & Zignago, 2011), joined via `NUMERIC_TO_ISO3`; regenerate with `reference/build_distance_reference.py`. Palestine and Montenegro have no CEPII entry and fall back to a neutral score. |
+| `LANGUAGE_SIMILARITY` | Comtrade numeric country code | Language/cultural scoring (0.0–1.0) | Blend of DICL's `lp` (linguistic proximity, weight 0.8) and `cnl` (common native language, weight 0.2) — Gurevich, Herman, Toubal & Yotov (2025), https://doi.org/10.7910/DVN/8WGJTL; regenerate with `reference/build_language_reference.py` |
 | `PRODUCTS` | Product name | 34 pilot products with HS codes | UNDP/ACCI product selection |
 | `OPPORTUNITY_SCORE_WEIGHTS` | Dimension name | Scoring model weights | Scoping note methodology |
 
-**Limitations:** Static lookups do not auto-update when trade agreements change. Manual review required when FTA status changes.
+**Limitations:** Static lookups do not auto-update between data-source refreshes — rerun the relevant `reference/build_*.py` script and the ETL to pick up new CEPII/DICL releases.
+
+**Preferential trade access (`has_fta` / `score_fta`)** is no longer a static lookup — it's derived live in `etl/transform.py` (`enrich_indicators_with_scores`) from WITS's own AHS/MFN partner-segment indicator (`indicators.tariff_indicator == 'AHS'`), reusing the same WITS fetch that already powers the tariff dimension rather than a hand-maintained "which FTAs is Afghanistan in" dict. `AHS` means WITS has an Afghanistan-specific applied-tariff record on file for that reporter; it doesn't guarantee that specific rate is lower than the MFN rate (MFN is only fetched as a fallback when AHS is unavailable, not always both), but the actual rate — whichever indicator it came from — is already fully captured in `score_tariff` separately.
 
 ---
 
@@ -235,9 +241,11 @@ For each (product, market) pair, all supplying countries (excluding world total 
 
 ### 4.5 Price competitiveness
 
-Afghan unit price = `trade_value_usd / trade_quantity` (or `/ net_weight_kg` as fallback).
+Afghan unit price = `trade_value_usd / net_weight_kg` (basis `"kg"`), **except** for products in `config.NATIVE_UNIT_PRICE_BASES` (currently `{"m²", "u"}`, i.e. Woven/Knotted Carpets and Cashmere Sweaters) where, if every one of Afghanistan's own rows for that market/year agrees on that exact reported unit, `trade_value_usd / trade_quantity` on that native unit is used instead — see "Native-unit pricing" below for why and when. **No fallback beyond that allowlist** — if neither basis is available (net weight wasn't reported, and no unanimous native unit applies), `unit_price_usd` is `NULL`, not an estimate on some other, unverifiable basis. Each competitor's implied unit price follows the identical two-basis rule, computed on whichever basis Afghanistan's own price used; a competitor missing that basis (no net weight, on the default path; a different or missing `quantity_unit`, on the native-unit path) is excluded from the comparison rather than included on a possibly-incompatible unit.
 
-Market average price = mean unit price across all suppliers to the market.
+`unit_price_usd` and `market_avg_price_usd` are always accompanied by `price_basis` (`"kg"` or the native unit actually used, e.g. `"m²"`) — a bare price figure is ambiguous once different products can be priced on different bases; the frontend shows it as a unit suffix (`$45/kg` vs `$120/m²`).
+
+Market average price = mean unit price across the suppliers who *do* have data on the same basis, **after excluding unit-mismatched outliers** (see below). If Afghanistan has no usable basis, or no competitor shares the one it used, `market_avg_price_usd`, `price_vs_market_pct`, and `price_competitiveness` are all `NULL` for that row — see "No fallback policy" below.
 
 | Label | Condition (% vs. market average) |
 |---|---|
@@ -248,9 +256,27 @@ Market average price = mean unit price across all suppliers to the market.
 
 Thresholds defined in `config.py` → `PRICE_COMPETITIVENESS`.
 
+**Known limitation — quantity-unit inconsistency across reporters.** Comtrade lets each reporting country submit `trade_quantity` in whatever unit its own customs system uses (kg, m², pieces, ...), and the unit label (`qtyUnitAbbr`) is frequently blank — confirmed empirically for several products in this dataset (e.g. Woven Carpets → Italy, 2025: implied unit price ranged $11.47 to $5,834.57 across suppliers for the same product/market/year, a ~500x spread explainable only by unit mismatch, not real pricing).
+
+*Handling, three parts:*
+
+1. **Use only a consistent basis — no unverified fallback (`_unit_price()` and `_price_competitiveness()`, `etl/transform.py`).** Both default to `net_weight_kg`/`netWgt`. Net weight in kilograms is reported far more consistently across countries than the free-form "quantity" field, which each reporter's customs system expresses in whatever unit it natively uses (kg, m², pieces, ...) — this is the trade-literature's preferred normalisation, not just a workaround (Berthou & Emlinger, *"The Trade Unit Values Database,"* CEPII Working Paper 2011-10, §2.2 and Table 5 — e.g. Germany reports 99.6% of import value in kg vs. the US only 19.5%, for the same product categories; the same paper notes this is also the methodology behind CEPII's BACI database, Gaulier & Zignago 2010). An earlier version of this fix fell back to the ambiguous `trade_quantity`/`qty` field whenever weight was missing — that blanket fallback was deliberately removed: a silent fallback re-introduces the exact unit-mismatch risk this section exists to prevent. Leaving the figure `NULL` is the intended, safer outcome when neither basis below is usable.
+
+   **Native-unit pricing (2026-08).** Once `quantity_unit` started being reliably resolved (via a Comtrade reference-table lookup — `qtyUnitAbbr` itself is blank in practice, see `etl/fetch.py`'s `_load_qty_unit_labels()`), a live check across all 38 products found something the blanket policy above couldn't take advantage of: *when a unit is reported at all, every supplier that reports one agrees on the same unit* — there's no per-product mixing to filter, just a null/non-null split. For most products that unit is `"kg"` anyway, so nothing changes. But for carpets it's `"m²"` and for Cashmere Sweaters it's `"u"` (pieces) — a genuinely more meaningful basis than weight for those goods, not just a different scale of the same thing. `config.NATIVE_UNIT_PRICE_BASES` lists exactly these two; a third consistent case, Lapis Lazuli (Worked) reporting in `"carat"`, was deliberately left off the list — carat is still a weight unit (1kg = 5000 carats exactly), so switching to it wouldn't change the price signal, only add a redundant weight-basis path. `_unit_price()` only takes the native-unit path when **every** row on Afghanistan's side for that market/year agrees on one of these units (`_native_unit_basis()`); any disagreement, or a unit outside the allowlist, falls back to `net_weight_kg` exactly as before. `_price_competitiveness()` then computes competitor prices on that *same* basis Afghanistan's price used — a competitor reporting a different (or no) unit is excluded from that market's comparison rather than mixed in, the same exclusion principle as the weight-basis path.
+
+   *Why this needed a real fix along the way, not just the feature itself:* the reference-table lookup that makes `quantity_unit` resolvable at all first had two bugs worth recording. (1) A `None` result from that lookup could get silently reinterpreted by pandas as a float `NaN` internal to a `.combine_first()` chain, which then round-tripped through Postgres as the literal string `"NaN"` in a `TEXT` column instead of `NULL` — fixed by building the resolved Series from a plain Python list with an explicit `object` dtype instead of chained vectorised ops. (2) Because `etl/run.py` fetches products concurrently (`_PRODUCT_MAX_WORKERS`), several threads raced to populate the same in-process reference-table cache at once; an unsynchronised write from one racing thread that hit Comtrade's rate limit could permanently blank the cache (`{}`) for every product processed afterward in that run — fixed with a lock (`_qty_unit_labels_lock`) plus never caching a failure. Both are covered by regression tests in `tests/test_comtrade_fetch.py` (`TestResolveQuantityUnits`).
+2. **Trim what still gets through.** Net weight isn't perfectly guaranteed to be error-free either (a data-entry mistake, or gross-weight-vs-net-weight confusion, can still produce an implausible value even within a nominally consistent unit). `_price_competitiveness()` computes the median unit value across suppliers who reported weight, then excludes any whose implied price falls outside `median × PRICE_OUTLIER_BAND_MULTIPLIER` / `median ÷ PRICE_OUTLIER_BAND_MULTIPLIER` before averaging what remains — the same outlier band CEPII uses when cleaning raw Comtrade unit values (same paper, §2.3 and Appendix A2). `PRICE_OUTLIER_BAND_MULTIPLIER = 10.0` is defined in `config.py` rather than inlined specifically so its sensitivity can be tested — `etl/tests/test_transform.py::TestPriceOutlierBandRobustness` confirms the exclusion outcome is stable across a range of reasonable multipliers (3x–20x), and separately confirms it does start breaking down at an unreasonably generous one (50x) — i.e. 10x isn't an arbitrary pick that happens to work only at that exact value, nor a value assumed to be safe no matter how large.
+3. **Leave it undetermined rather than guess (UI).** When `price_competitiveness` is `NULL`, the market profile page shows "No unit data for comparison" instead of a label, plus a short note that this dimension wasn't meaningfully factored into the opportunity score for that row. Backend-side, `_score_price(None)` still returns the same neutral default (50) every other missing dimension in this model uses (§4.6, "Missing data handling") — this fix doesn't change *that* mechanism, it only changes how often a genuinely unverifiable number gets treated as if it were a real one.
+
+Together, (1) and (2) don't recover the *true* unit for every row — that would require either unit labels Comtrade often doesn't provide, or a full mirror-flow-derived conversion-factor exercise (same CEPII paper, §2.2) — so a non-null `price_competitiveness` should still be read as an indicative signal, not a precise measurement; the international statistics literature broadly cautions against treating customs-derived unit values as reliable price proxies even after cleaning (Silver, *"Do Unit Value Export, Import, and Terms of Trade Indices Represent or Misrepresent Price Indices?,"* IMF/UN ECE — unit value indices formally fail the price-index "commensurability" test when units of measurement vary, §III.B).
+
+**A narrower gap the no-fallback policy doesn't close:** the mitigations above only *detect* mismatches where there's a peer group to compare against — that's true for competitors (several suppliers to compare) but never true for Afghanistan's own figure, which is always a single, independently-sourced value regardless of which field it's built from. Removing the `trade_quantity` fallback closes the *loud* failure mode (Afghanistan's number silently computed on an ambiguous unit) — but if Afghanistan's own reported `net_weight_kg` is itself wrong for some other reason (data entry error, gross/net confusion), there's still no second data point to catch that. A genuine fix for that residual case would need a different technique — e.g. cross-checking `unit_price_usd` (from `mirror_df`) against Afghanistan's own entry within the competitor breakdown (`global_df`, a second, independently-fetched source for the same fact) — not yet implemented.
+
+Downstream effects: `unit_price_usd`, `market_avg_price_usd`, `price_vs_market_pct`, `price_competitiveness`, and `score_price_competitiveness` (13% of `opportunity_score`) all inherit this limitation, and are `NULL`/neutral more often now than under the old fallback behaviour (in exchange for those that *aren't* null being more trustworthy). `global_market_size_usd`, `afg_export_value_usd`, `market_share_pct`, and `afg_supplier_rank` are **not** affected — they're computed from `trade_value_usd` alone, never divided by quantity.
+
 ### 4.6 Opportunity score computation
 
-Each of nine dimensions is normalised to 0–100, then combined as a weighted sum:
+Each of eight dimensions is normalised to 0–100, then combined as a weighted sum:
 
 | Dimension | Weight | Normalisation method |
 |---|---|---|
@@ -258,13 +284,14 @@ Each of nine dimensions is normalised to 0–100, then combined as a weighted su
 | Market growth | 18% | CAGR mapped to 0–100 (negative CAGR → 0, ≥20% → 100) |
 | Market quality | 13% | Composite of LPI + regulatory quality + political stability |
 | Price competitiveness | 13% | Label-based: Highly Competitive=100, Competitive=75, Average=50, Above Market=25 |
-| Tariff | 10% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
+| Tariff | 12% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
 | Afghan foothold | 10% | Log-scaled existing export value |
 | Distance | 10% | Inverse distance from Kabul (closer = higher) |
 | Language | 4% | `similarity × 100` (0.0–1.0 lookup) |
-| FTA access | 2% | 100 if FTA exists, 0 otherwise |
 
 Weights must sum to 1.0 (enforced in `config.py`).
+
+**FTA access (`score_fta`) is computed but excluded from the composite.** WITS's AFG-specific (`partner=004`) tariff schedule returns "NoRecordsFound" for every reporter checked, so `has_fta` is `False` and `score_fta` is 0 for essentially every row — a weight that could never move the score. Its former 2% share was folded into Tariff (10% → 12%) above. `has_fta`/`score_fta` are still computed per row and stored in `indicators` in case WITS's coverage improves, and remain available via the API, but are no longer part of `opportunity_score` and are not shown in the frontend's score breakdown.
 
 **Missing data handling:** If a dimension cannot be computed (e.g. no WITS tariff), its sub-score defaults to 50 (neutral) and the composite score is still calculated. This avoids excluding markets with data gaps while not over-penalising them. Implemented in `etl/transform.py` (`_score_tariff`, `_score_market_quality`, `_score_distance`, `_score_growth`, `_score_price`).
 
@@ -350,7 +377,7 @@ Afghanistan's mirror export flows: one row per (product, importer, year).
 | `year` | INTEGER | NOT NULL | Trade year | Comtrade `refYear` |
 | `trade_value_usd` | NUMERIC(20,2) | Yes | Trade value, USD | Comtrade `primaryValue` |
 | `trade_quantity` | NUMERIC(20,4) | Yes | Quantity traded | Comtrade `qty` |
-| `quantity_unit` | TEXT | Yes | Unit of quantity | Comtrade `qtyUnitAbbr` |
+| `quantity_unit` | TEXT | Yes | Unit of quantity | Comtrade `qtyUnitAbbr`, resolved from `qtyUnitCode` against Comtrade's reference table when `qtyUnitAbbr` is blank (the common case) -- `etl/fetch.py`'s `_resolve_quantity_units()` |
 | `net_weight_kg` | NUMERIC(20,4) | Yes | Net weight, kg | Comtrade `netWgt` |
 | `fetched_at` | TIMESTAMPTZ | NOT NULL | ETL fetch timestamp | System |
 
@@ -372,6 +399,7 @@ Supplier countries exporting a product to a given market.
 | `supplier_name` | TEXT | NOT NULL | Exporting country name | Comtrade `partnerDesc` |
 | `trade_value_usd` | NUMERIC(20,2) | Yes | Import value from this supplier, USD | Comtrade `primaryValue` |
 | `trade_quantity` | NUMERIC(20,4) | Yes | Quantity | Comtrade `qty` |
+| `quantity_unit` | TEXT | Yes | Unit of quantity | Same resolution as `trade_flows.quantity_unit` above |
 
 **Unique key:** (`product_id`, `market_code`, `supplier_code`, `year`).
 
@@ -399,7 +427,8 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | `market_share_pct` | NUMERIC(10,6) | Afghanistan's share of market imports % | Computed |
 | `afg_supplier_rank` | INTEGER | Afghanistan's rank among suppliers | Computed |
 | `unit_price_usd` | NUMERIC(20,6) | Afghan unit price, USD | Computed |
-| `market_avg_price_usd` | NUMERIC(20,6) | Market average unit price, USD | Computed |
+| `price_basis` | TEXT | What `unit_price_usd`/`market_avg_price_usd` are priced per -- `"kg"` or a native unit from `config.NATIVE_UNIT_PRICE_BASES` (e.g. `"m²"`); see §4.5 | Computed |
+| `market_avg_price_usd` | NUMERIC(20,6) | Market average unit price, USD, same basis as `price_basis` | Computed |
 | `price_vs_market_pct` | NUMERIC(10,4) | Afghan price vs. market average % | Computed |
 | `price_competitiveness` | TEXT | Competitiveness label | Computed |
 | **Opportunity score** | | | |
@@ -411,11 +440,15 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | **World Bank context (denormalised)** | | | |
 | `gdp_per_capita_usd` | NUMERIC(20,2) | GDP per capita | World Bank |
 | `lpi_score` | NUMERIC(5,3) | Logistics Performance Index | World Bank |
+| `lpi_score_year` | INTEGER | Year `lpi_score` was actually reported for (LPI is triennial — can lag `computed_for_year`) | World Bank |
 | `regulatory_quality` | NUMERIC(6,4) | Regulatory quality estimate | World Bank |
+| `regulatory_quality_year` | INTEGER | Year `regulatory_quality` was actually reported for (WGI lags 1–2 years) | World Bank |
 | `political_stability` | NUMERIC(6,4) | Political stability estimate | World Bank |
+| `political_stability_year` | INTEGER | Year `political_stability` was actually reported for | World Bank |
 | **WITS tariff** | | | |
 | `tariff_rate_pct` | NUMERIC(6,3) | Import tariff rate % | WITS |
 | `tariff_indicator` | TEXT | `'AHS'` (preferential) or `'MFN'` (general) | WITS |
+| `tariff_year` | INTEGER | Year WITS actually reported the rate for (can be earlier than `computed_for_year` — WITS lags) | WITS |
 | **Sub-scores (0–100 each)** | | | |
 | `score_market_size` | NUMERIC(5,2) | Market size dimension score | Computed |
 | `score_market_growth` | NUMERIC(5,2) | Market growth dimension score | Computed |
@@ -424,7 +457,7 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | `score_afg_foothold` | NUMERIC(5,2) | Afghan foothold dimension score | Computed |
 | `score_distance` | NUMERIC(5,2) | Proximity dimension score | Computed |
 | `score_language` | NUMERIC(5,2) | Language dimension score | Computed |
-| `score_fta` | NUMERIC(5,2) | FTA access dimension score | Computed |
+| `score_fta` | NUMERIC(5,2) | FTA access dimension score — stored but not weighted into `opportunity_score` (§4.6) | Computed |
 | `score_tariff` | NUMERIC(5,2) | Tariff dimension score | Computed |
 | `computed_at` | TIMESTAMPTZ | Timestamp of computation | System |
 
@@ -454,7 +487,7 @@ ETL execution audit log.
 |---|---|
 | **ETL schedule** | Monthly — 1st of month, 02:00 UTC (GitHub Actions `etl.yml`) |
 | **Manual trigger** | `docker-compose exec backend python -m etl.run` |
-| **Years retained** | 2021–2024 (configurable via `config.YEARS`) |
+| **Years retained** | 2021–2025 (configurable via `config.YEARS`) |
 | **Upsert strategy** | Idempotent — `load.py` upserts on unique keys; re-running ETL replaces existing rows |
 | **Partial runs** | Supported: `--products "Saffron" "Dried Grapes (Raisins)"` |
 | **Skip flags** | `--skip-world-bank`, `--skip-tariffs`, `--dry-run` |

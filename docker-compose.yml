@@ -16,6 +16,23 @@ services:
       timeout: 5s
       retries: 5
 
+  # Throwaway Postgres for etl/tests/test_load.py -- separate from `db` so
+  # running the integration tests never touches real dev/demo data. No
+  # volume: data doesn't need to survive a container restart.
+  db_test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: afg_market_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .

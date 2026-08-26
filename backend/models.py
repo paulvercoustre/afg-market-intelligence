@@ -76,6 +76,7 @@ class CompetitorFlow(Base):
     supplier_name = Column(Text, nullable=False)
     trade_value_usd = Column(Numeric(20, 2))
     trade_quantity = Column(Numeric(20, 4))
+    quantity_unit = Column(Text)
 
     product = relationship("Product", back_populates="competitor_flows")
 
@@ -89,8 +90,11 @@ class Indicator(Base):
     computed_for_year = Column(Integer, nullable=False)
 
     # Trade indicators
+    trade_data_year = Column(Integer)  # year the trade fields below actually came from -- can be earlier than computed_for_year if this market's Comtrade submission for that year hasn't landed yet
     global_market_size_usd = Column(Numeric(20, 2))
     afg_export_value_usd = Column(Numeric(20, 2))
+    afg_last_export_year = Column(Integer)  # most recent year (bounded, see etl/transform.py) Afghanistan had any recorded export to this market -- can differ from trade_data_year when the current year's afg value is a genuine zero
+    afg_last_export_value_usd = Column(Numeric(20, 2))
     yoy_growth_pct = Column(Numeric(10, 4))
     cagr_pct = Column(Numeric(10, 4))
     absolute_growth_usd = Column(Numeric(20, 2))
@@ -100,6 +104,7 @@ class Indicator(Base):
     market_share_pct = Column(Numeric(10, 6))
     afg_supplier_rank = Column(Integer)
     unit_price_usd = Column(Numeric(20, 6))
+    price_basis = Column(Text)  # "kg" (net_weight_kg) or a native unit from config.NATIVE_UNIT_PRICE_BASES, e.g. "m²"
     market_avg_price_usd = Column(Numeric(20, 6))
     price_vs_market_pct = Column(Numeric(10, 4))
     price_competitiveness = Column(Text)
@@ -115,12 +120,16 @@ class Indicator(Base):
     # World Bank context (denormalised for query efficiency)
     gdp_per_capita_usd = Column(Numeric(20, 2))
     lpi_score = Column(Numeric(5, 3))
+    lpi_score_year = Column(Integer)  # year lpi_score was actually reported for -- LPI is triennial
     regulatory_quality = Column(Numeric(6, 4))
+    regulatory_quality_year = Column(Integer)  # WGI lags 1-2 years behind computed_for_year
     political_stability = Column(Numeric(6, 4))
+    political_stability_year = Column(Integer)
 
     # WITS tariff data
     tariff_rate_pct = Column(Numeric(6, 3))
     tariff_indicator = Column(Text)  # 'AHS' (preferential) or 'MFN' (general)
+    tariff_year = Column(Integer)  # year the rate was actually reported for -- can be earlier than computed_for_year, WITS lags
 
     # Sub-scores (0–100 each)
     score_market_size = Column(Numeric(5, 2))

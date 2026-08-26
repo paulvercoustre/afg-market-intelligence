@@ -11,6 +11,7 @@ import argparse
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -22,7 +23,7 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from backend.country_names import resolve_country_name
-from config import PRODUCTS, TOP_N_MARKETS, YEARS
+from config import NUMERIC_TO_ISO3, PRODUCTS, TOP_N_MARKETS, YEARS
 from etl import fetch, load, transform
 
 logging.basicConfig(
@@ -34,6 +35,15 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# Products are fetched from Comtrade concurrently: each product's mirror +
+# global-import calls are independent, and Comtrade's own client hardcodes a
+# 120s timeout per HTTP attempt with no way to shorten it (see etl/fetch.py),
+# so one slow/stuck product no longer blocks the other 32 behind it serially.
+# Kept modest (not e.g. 8+) since higher concurrency means more simultaneous
+# load against a subscription-key-rate-limited API and against WITS's own
+# internal thread pool if tariffs aren't skipped.
+_PRODUCT_MAX_WORKERS = 3
 
 
 def _engine():
@@ -90,10 +100,15 @@ def run_product(
     dry_run: bool,
     market_context: dict[str, dict],  # {country_code: {year: {field: value}}}
     skip_tariffs: bool = False,
+    refresh_cache: bool = False,
 ) -> dict:
     hs_codes = cfg["codes"]
     logger.info(f"▶  {product_name}  ({', '.join(hs_codes)})")
     errors = []
+    # Products run concurrently (see _PRODUCT_MAX_WORKERS), so every log line
+    # below is prefixed with the product name -- without it, interleaved
+    # output from multiple products would be unreadable.
+    tag = f"[{product_name}]"
 
     # 1. Upsert product row, get its id
     product_id = None
@@ -114,7 +129,7 @@ def run_product(
             if not df.empty:
                 mirror_frames.append(df)
         except Exception as e:
-            logger.error(f"  fetch_mirror_exports failed for HS {hs}: {e}")
+            logger.error(f"  {tag} fetch_mirror_exports failed for HS {hs}: {e}")
             errors.append({"hs": hs, "stage": "fetch_mirror", "error": str(e)})
 
     mirror_df = pd.concat(mirror_frames, ignore_index=True) if mirror_frames else pd.DataFrame()
@@ -127,22 +142,22 @@ def run_product(
             if not df.empty:
                 global_frames.append(df)
         except Exception as e:
-            logger.error(f"  fetch_global_imports failed for HS {hs}: {e}")
+            logger.error(f"  {tag} fetch_global_imports failed for HS {hs}: {e}")
             errors.append({"hs": hs, "stage": "fetch_global", "error": str(e)})
 
     global_df = pd.concat(global_frames, ignore_index=True) if global_frames else pd.DataFrame()
 
     if mirror_df.empty and global_df.empty:
-        logger.warning(f"  No data fetched for {product_name} — skipping")
+        logger.warning(f"  {tag} No data fetched — skipping")
         return {"product": product_name, "status": "no_data", "errors": errors}
 
     # 4. Determine markets: ALL markets for scoring, top N for competitor flows
     all_codes = _all_market_codes(global_df)
     top_codes = _top_market_codes(mirror_df, global_df, TOP_N_MARKETS)
-    logger.info(f"  Markets for scoring: {len(all_codes)}, top {TOP_N_MARKETS} for detail: {top_codes}")
+    logger.info(f"  {tag} Markets for scoring: {len(all_codes)}, top {TOP_N_MARKETS} for detail: {top_codes}")
 
     if dry_run:
-        logger.info(f"  [dry-run] Skipping DB writes for {product_name}")
+        logger.info(f"  {tag} [dry-run] Skipping DB writes")
         return {"product": product_name, "status": "dry_run", "errors": errors}
 
     # 5. Upsert market rows for all scored markets
@@ -153,12 +168,12 @@ def run_product(
     # 6. Transform + load trade flows
     flow_rows = transform.to_trade_flows(mirror_df, product_id)
     n_flows = load.bulk_upsert_trade_flows(engine, flow_rows)
-    logger.info(f"  Upserted {n_flows} trade_flow rows")
+    logger.info(f"  {tag} Upserted {n_flows} trade_flow rows")
 
     # 7. Transform + load competitor flows (top markets only)
     comp_rows = transform.to_competitor_flows(global_df, product_id, top_codes)
     n_comp = load.bulk_upsert_competitor_flows(engine, comp_rows)
-    logger.info(f"  Upserted {n_comp} competitor_flow rows")
+    logger.info(f"  {tag} Upserted {n_comp} competitor_flow rows")
 
     # 8. Compute indicators for ALL markets
     latest_year = max(YEARS)
@@ -169,10 +184,10 @@ def run_product(
     tariffs = {}
     if not skip_tariffs:
         try:
-            tariffs = _fetch_tariffs_for_product(all_codes, hs_codes, YEARS)
-            logger.info(f"  Fetched tariff data for {len(tariffs)} markets")
+            tariffs = _fetch_tariffs_for_product(all_codes, hs_codes, YEARS, refresh_cache=refresh_cache)
+            logger.info(f"  {tag} Fetched tariff data for {len(tariffs)} markets")
         except Exception as exc:
-            logger.warning(f"  Tariff fetch failed: {exc} — continuing without tariff scores")
+            logger.warning(f"  {tag} Tariff fetch failed: {exc} — continuing without tariff scores")
             errors.append({"hs": ",".join(hs_codes), "stage": "fetch_tariffs", "error": str(exc)})
 
     # 10. Enrich with opportunity scores
@@ -181,32 +196,39 @@ def run_product(
     )
 
     n_ind = load.bulk_upsert_indicators(engine, ind_rows)
-    logger.info(f"  Upserted {n_ind} indicator rows (all markets, with scores)")
+    logger.info(f"  {tag} Upserted {n_ind} indicator rows (all markets, with scores)")
 
     return {"product": product_name, "status": "success", "errors": errors}
 
 
 def _fetch_tariffs_for_product(market_codes: list[str], hs_codes: list[str],
-                               years: list[int]) -> dict[str, dict]:
+                               years: list[int], refresh_cache: bool = False) -> dict[str, dict]:
     """
     Fetch tariff data for the given markets and HS codes.
-    Returns {market_numeric_code: {'rate': float, 'indicator': str}} where rate
-    is averaged across the product's HS codes.
+    Returns {market_numeric_code: {'rate': float, 'indicator': str, 'year': int}}
+    where rate is averaged across the product's HS codes. 'year' is the actual
+    year WITS reported the rate for (see fetch.fetch_tariff_rates) -- since
+    _tariff_rows_for_market stops at the first year with any data, every HS
+    code returned for a given market shares the same year, so taking the last
+    one seen (like 'indicator' below) is safe.
     """
-    rows = fetch.fetch_tariff_rates(market_codes, hs_codes, years)
+    rows = fetch.fetch_tariff_rates(market_codes, hs_codes, years, refresh_cache=refresh_cache)
 
     # Aggregate per market: average rate across the product's HS codes.
     by_market: dict[str, list[float]] = {}
     indicator_by_market: dict[str, str] = {}
+    year_by_market: dict[str, int] = {}
     for r in rows:
         code = r["market_code"]
         by_market.setdefault(code, []).append(r["tariff_rate_pct"])
         indicator_by_market[code] = r["indicator"]
+        year_by_market[code] = r["year"]
 
     return {
         code: {
             "rate": sum(rates) / len(rates),
             "indicator": indicator_by_market.get(code),
+            "year": year_by_market.get(code),
         }
         for code, rates in by_market.items()
     }
@@ -248,7 +270,7 @@ def _build_market_context(wb_rows: list[dict]) -> dict[str, dict[int, dict]]:
 
     return {
         numeric: ctx_iso3[iso3]
-        for numeric, iso3 in _load_numeric_to_iso3().items()
+        for numeric, iso3 in NUMERIC_TO_ISO3.items()
         if iso3 in ctx_iso3
     }
 
@@ -275,6 +297,11 @@ def main():
         "--skip-tariffs", action="store_true",
         help="Skip WITS tariff fetch (faster runs; tariff scores default to neutral)",
     )
+    parser.add_argument(
+        "--refresh-cache", action="store_true",
+        help="Bypass the on-disk WITS tariff cache and force a fresh fetch, "
+             "regardless of cache age (normally cache entries auto-expire after 7 days)",
+    )
     args = parser.parse_args()
 
     target = args.products or list(PRODUCTS.keys())
@@ -283,7 +310,7 @@ def main():
         logger.error(f"Unknown products: {unknown}")
         sys.exit(1)
 
-    engine = None if args.dry_run else _engine()
+    engine = None if args.dry_run else _engine() #database engine
 
     # ── Phase A: World Bank fetch (once per run, across all markets) ──────────
     market_context: dict[str, dict[int, dict]] = {}
@@ -296,11 +323,17 @@ def main():
             logger.info(f"Loaded {len(wb_rows)} existing market_context rows (--skip-world-bank)")
         else:
             # Map Comtrade numeric codes to ISO-3 alpha for the WB API
-            # (WB accepts ISO-3 alpha; Comtrade uses numeric codes)
-            from config import DISTANCE_FROM_KABUL_KM
-            _numeric_to_iso3 = _load_numeric_to_iso3()
-            all_numeric_codes = list(DISTANCE_FROM_KABUL_KM.keys())
-            iso3_codes = [_numeric_to_iso3[c] for c in all_numeric_codes if c in _numeric_to_iso3]
+            # (WB accepts ISO-3 alpha; Comtrade uses numeric codes).
+            #
+            # The set of countries to fetch is driven directly by
+            # NUMERIC_TO_ISO3's own keys -- it must NOT be filtered through an
+            # unrelated table like DISTANCE_FROM_KABUL_KM (a prior version did
+            # exactly that): that table is maintained for a different scoring
+            # dimension entirely and has its own, different set of gaps, so
+            # gating World Bank fetches on it silently dropped every country
+            # present in one table but not the other, regardless of whether WB
+            # data was actually available for them.
+            iso3_codes = list(NUMERIC_TO_ISO3.values())
 
             logger.info(f"Fetching World Bank indicators for {len(iso3_codes)} countries…")
             try:
@@ -312,14 +345,29 @@ def main():
                 logger.error(f"World Bank fetch failed: {exc} — continuing without WB data")
 
     # ── Phase B: Per-product ETL ──────────────────────────────────────────────
+    # Products are independent (their own HS codes, own DB rows), so they run
+    # concurrently -- see _PRODUCT_MAX_WORKERS for why the pool is kept small.
     results = []
     all_errors = []
-    for name in target:
-        result = run_product(engine, name, PRODUCTS[name], dry_run=args.dry_run,
-                             market_context=market_context,
-                             skip_tariffs=args.skip_tariffs)
-        results.append(result)
-        all_errors.extend(result.get("errors", []))
+    with ThreadPoolExecutor(max_workers=_PRODUCT_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(run_product, engine, name, PRODUCTS[name], dry_run=args.dry_run,
+                       market_context=market_context, skip_tariffs=args.skip_tariffs,
+                       refresh_cache=args.refresh_cache): name
+            for name in target
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.error(f"[{name}] run_product crashed: {exc}")
+                result = {
+                    "product": name, "status": "error",
+                    "errors": [{"hs": None, "stage": "run_product", "error": str(exc)}],
+                }
+            results.append(result)
+            all_errors.extend(result.get("errors", []))
 
     successes = sum(1 for r in results if r["status"] == "success")
     logger.info(f"\n{'─'*60}")
@@ -330,32 +378,6 @@ def main():
     if engine and not args.dry_run:
         status = "success" if not all_errors else "partial"
         load.log_pipeline_run(engine, status, successes, all_errors)
-
-
-def _load_numeric_to_iso3() -> dict[str, str]:
-    """
-    Mapping from Comtrade numeric reporter codes to ISO-3 alpha codes for the
-    World Bank API. NB: Comtrade uses non-standard codes for a few countries
-    (India 699, USA 842, Switzerland 757, France 251, Norway 579) — these must
-    match the codes that actually appear in trade data, not ISO 3166 numeric.
-    """
-    return {
-        "586": "PAK", "699": "IND", "364": "IRN", "860": "UZB", "762": "TJK",
-        "795": "TKM", "398": "KAZ", "417": "KGZ", "156": "CHN", "784": "ARE",
-        "682": "SAU", "792": "TUR", "634": "QAT", "414": "KWT", "512": "OMN",
-        "048": "BHR", "400": "JOR", "368": "IRQ", "818": "EGY", "276": "DEU",
-        "826": "GBR", "528": "NLD", "251": "FRA", "380": "ITA", "56": "BEL",
-        "724": "ESP", "757": "CHE", "040": "AUT", "616": "POL", "203": "CZE",
-        "752": "SWE", "246": "FIN", "579": "NOR", "208": "DNK", "372": "IRL",
-        "300": "GRC", "642": "ROU", "100": "BGR", "348": "HUN", "703": "SVK",
-        "842": "USA", "124": "CAN", "484": "MEX", "076": "BRA", "032": "ARG",
-        "392": "JPN", "410": "KOR", "702": "SGP", "458": "MYS", "360": "IDN",
-        "764": "THA", "704": "VNM", "050": "BGD", "144": "LKA", "524": "NPL",
-        "104": "MMR", "608": "PHL", "036": "AUS", "554": "NZL", "710": "ZAF",
-        "566": "NGA", "012": "DZA", "504": "MAR", "231": "ETH", "643": "RUS",
-        "804": "UKR", "112": "BLR", "031": "AZE", "268": "GEO", "051": "ARM",
-        "064": "BTN", "462": "MDV",
-    }
 
 
 if __name__ == "__main__":

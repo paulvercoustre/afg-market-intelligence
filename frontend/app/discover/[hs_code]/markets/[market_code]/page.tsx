@@ -6,16 +6,29 @@ import ScoreBadge from '@/components/ScoreBadge'
 import ScoreBar from '@/components/ScoreBar'
 import NextSteps from '@/components/NextSteps'
 
+// Display label per config.NATIVE_UNIT_PRICE_BASES value (falls back to the
+// raw basis string for anything not listed, e.g. a future addition there).
+const PRICE_BASIS_LABELS: Record<string, string> = {
+  kg: 'kg',
+  'm²': 'm²',
+  u: 'piece',
+}
+
+function formatUnitPrice(value: number | null, basis: string | null): string {
+  const formatted = formatUSD(value, false)
+  if (value == null || !basis) return formatted
+  return `${formatted} /${PRICE_BASIS_LABELS[basis] ?? basis}`
+}
+
 const SCORE_DIMENSIONS = [
   { key: 'market_size', label: 'Market size', weight: 0.20 },
   { key: 'market_growth', label: 'Market growth', weight: 0.18 },
   { key: 'market_quality', label: 'Market quality', weight: 0.13 },
   { key: 'price_competitiveness', label: 'Price competitiveness', weight: 0.13 },
-  { key: 'tariff', label: 'Tariff rate', weight: 0.10 },
+  { key: 'tariff', label: 'Tariff rate', weight: 0.12 },
   { key: 'afg_foothold', label: 'Afghan foothold', weight: 0.10 },
   { key: 'distance', label: 'Geographic proximity', weight: 0.10 },
   { key: 'language', label: 'Language similarity', weight: 0.04 },
-  { key: 'fta_status', label: 'FTA / trade access', weight: 0.02 },
 ] as const
 
 export default async function MarketProfilePage(
@@ -24,6 +37,27 @@ export default async function MarketProfilePage(
   const { hs_code, market_code } = await props.params
   const profile = await getMarketProfile(hs_code, market_code)
   if (!profile) notFound()
+
+  // Trade figures fall back to this market's own most recent reported year
+  // when computed_for_year's data hasn't landed at Comtrade yet -- flag it
+  // whenever that fallback actually kicked in, so a lower score doesn't get
+  // mistaken for a weak market when it's really just a reporting lag.
+  const tradeDataYear = profile.trade?.trade_data_year ?? null
+  const isStaleTradeData =
+    tradeDataYear != null &&
+    profile.computed_for_year != null &&
+    tradeDataYear !== profile.computed_for_year
+
+  // Afghanistan can genuinely have zero recorded exports here for the
+  // current trade_data_year (a real signal, not a data gap) -- when that
+  // happens, surface the last year it did have any, purely for context,
+  // rather than showing a bare dash with no history at all.
+  const afgLastExportYear = profile.trade?.afg_last_export_year ?? null
+  const afgLastExportValue = profile.trade?.afg_last_export_value_usd ?? null
+  const showAfgLastExport =
+    profile.trade != null &&
+    profile.trade.afg_export_value_usd == null &&
+    afgLastExportYear != null
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -77,18 +111,35 @@ export default async function MarketProfilePage(
           {/* Trade data */}
           {profile.trade && (
             <Section title="Trade data">
+              {isStaleTradeData && (
+                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-md px-3 py-2 mb-4">
+                  This market&apos;s latest reported trade data is from {tradeDataYear}
+                  {' '}(not {profile.computed_for_year}) — Comtrade hasn&apos;t published its{' '}
+                  {profile.computed_for_year} figures yet, so the numbers and score below
+                  reflect {tradeDataYear}.
+                </p>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <StatCard
                   label="Afghan exports"
                   value={formatUSD(profile.trade.afg_export_value_usd)}
+                  sub={
+                    isStaleTradeData
+                      ? `(${tradeDataYear} data)`
+                      : showAfgLastExport
+                        ? `last exported ${afgLastExportYear}: ${formatUSD(afgLastExportValue)}`
+                        : undefined
+                  }
                 />
                 <StatCard
                   label="Global market size"
                   value={formatUSD(profile.trade.global_market_size_usd)}
+                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
                   label="Afghan market share"
-                  value={formatPct(profile.trade.market_share_pct, 2)}
+                  value={formatPct(profile.trade.market_share_pct, 2, false)}
+                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
                   label="CAGR"
@@ -103,6 +154,7 @@ export default async function MarketProfilePage(
                   <StatCard
                     label="Afghan supplier rank"
                     value={`#${profile.trade.afg_supplier_rank}`}
+                    sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                   />
                 )}
               </div>
@@ -115,11 +167,11 @@ export default async function MarketProfilePage(
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <StatCard
                     label="Afghan unit price"
-                    value={formatUSD(profile.trade.price.unit_price_usd, false)}
+                    value={formatUnitPrice(profile.trade.price.unit_price_usd, profile.trade.price.price_basis)}
                   />
                   <StatCard
                     label="Market avg price"
-                    value={formatUSD(profile.trade.price.market_avg_price_usd, false)}
+                    value={formatUnitPrice(profile.trade.price.market_avg_price_usd, profile.trade.price.price_basis)}
                   />
                   <StatCard
                     label="vs market avg"
@@ -128,9 +180,21 @@ export default async function MarketProfilePage(
                   <StatCard
                     label="Competitiveness"
                     value={profile.trade.price.price_competitiveness ?? '—'}
-                    highlight
+                    sub={
+                      profile.trade.price.price_competitiveness == null
+                        ? 'No unit data for comparison'
+                        : undefined
+                    }
+                    highlight={profile.trade.price.price_competitiveness != null}
                   />
                 </div>
+                {profile.trade.price.price_competitiveness == null && (
+                  <p className="text-[11px] text-gray-400 italic mt-2">
+                    Afghanistan or its competitors didn&apos;t report a comparable weight-based unit
+                    price for this market — price competitiveness isn&apos;t factored into the
+                    opportunity score for this row (treated as neutral).
+                  </p>
+                )}
               </div>
             </Section>
           )}
@@ -202,6 +266,8 @@ export default async function MarketProfilePage(
                     ? `${profile.context.lpi_score.toFixed(2)} / 5`
                     : '—'
                 }
+                dataYear={profile.context.lpi_score_year}
+                currentYear={profile.computed_for_year}
               />
               <ContextRow
                 label="Regulatory quality"
@@ -210,6 +276,8 @@ export default async function MarketProfilePage(
                     ? profile.context.regulatory_quality.toFixed(2)
                     : '—'
                 }
+                dataYear={profile.context.regulatory_quality_year}
+                currentYear={profile.computed_for_year}
               />
               <ContextRow
                 label="Political stability"
@@ -218,12 +286,16 @@ export default async function MarketProfilePage(
                     ? profile.context.political_stability.toFixed(2)
                     : '—'
                 }
+                dataYear={profile.context.political_stability_year}
+                currentYear={profile.computed_for_year}
               />
               {profile.context.tariff_rate_pct != null && (
                 <ContextRow
                   label={`Tariff rate (${profile.context.tariff_indicator ?? 'MFN'})`}
                   value={`${profile.context.tariff_rate_pct.toFixed(1)}%`}
                   highlight={profile.context.tariff_rate_pct >= 15}
+                  dataYear={profile.context.tariff_year}
+                  currentYear={profile.computed_for_year}
                 />
               )}
             </div>
@@ -278,16 +350,29 @@ function ContextRow({
   label,
   value,
   highlight,
+  dataYear,
+  currentYear,
 }: {
   label: string
   value: string
   highlight?: boolean
+  dataYear?: number | null
+  currentYear?: number | null
 }) {
+  const isStale = dataYear != null && currentYear != null && dataYear !== currentYear
   return (
     <div className="flex justify-between gap-2 py-1 border-b border-gray-50 last:border-0">
       <span className="text-gray-500">{label}</span>
       <span className={`font-medium tabular-nums ${highlight ? 'text-red-600' : 'text-gray-800'}`}>
         {value}
+        {isStale && (
+          <span
+            className="text-amber-500 font-normal ml-1"
+            title={`This value is from ${dataYear}, the most recent year reported -- not ${currentYear}.`}
+          >
+            ({dataYear})
+          </span>
+        )}
       </span>
     </div>
   )

@@ -133,7 +133,7 @@ alembic revision --autogenerate -m "description"
 
 ```
 afg-market-intelligence/
-├── config.py                    # Products (34 HS codes), score weights, country lookups
+├── config.py                    # Products (38, 37 unique HS codes), score weights, country lookups
 ├── requirements.txt
 ├── pyproject.toml               # Ruff + pytest config
 ├── alembic.ini
@@ -142,21 +142,25 @@ afg-market-intelligence/
 ├── Dockerfile.backend
 │
 ├── etl/
-│   ├── fetch.py                 # Comtrade + World Bank API clients
+│   ├── fetch.py                 # Comtrade + World Bank + WITS API clients
 │   ├── transform.py             # Data normalisation + opportunity score computation
 │   ├── load.py                  # Idempotent PostgreSQL upserts
-│   └── run.py                   # ETL orchestrator (CLI entry point)
+│   ├── run.py                   # ETL orchestrator (CLI entry point)
+│   └── verify.py                # DB sanity checks + optional live spot-checks
 │
 ├── migrations/
 │   └── versions/
 │       ├── 0001_initial_schema.py
-│       └── 0002_market_context_and_scores.py
+│       ├── 0002_market_context_and_scores.py
+│       ├── 0003_tariff_rates.py
+│       └── 0004_tariff_year.py
 │
 ├── backend/
 │   ├── main.py                  # FastAPI app
 │   ├── database.py              # SQLAlchemy engine + session
 │   ├── models.py                # ORM models
-│   ├── schemas.py               # Pydantic response schemas
+│   ├── schemas.py                # Pydantic response schemas
+│   ├── country_names.py         # UN M49 code → country name resolution
 │   ├── routers/
 │   │   ├── discovery.py         # GET /api/discover/*
 │   │   ├── products.py          # GET /api/products/*
@@ -164,10 +168,12 @@ afg-market-intelligence/
 │   ├── services/
 │   │   ├── discovery.py         # Ranked-market queries + next-step logic
 │   │   └── products.py          # Product/market indicator queries
-│   └── tests/
-│       └── test_api.py          # 21 contract tests (SQLite, no Docker)
+│   └── tests/                   # 47 tests total (SQLite, no Docker)
+│       ├── test_api.py          # 27 contract tests
+│       ├── test_country_names.py
+│       └── test_next_steps.py
 │
-├── frontend/                    # Next.js app — planned
+├── frontend/                    # Next.js app (discovery wizard UI, product grid, market profile)
 │
 ├── indicator_definitions.json   # Metric definitions for UI tooltips
 │
@@ -178,39 +184,55 @@ afg-market-intelligence/
 
 ---
 
-## Products covered (34 HS codes)
+## Products covered (38 products, 37 unique HS codes)
 
 | Category | Products |
 |----------|----------|
 | Tree Nuts | Almonds (in-shell, shelled), Walnuts (in-shell, shelled), Pistachios (in-shell, shelled), Pine Nuts |
-| Spices & Herbs | Saffron, Cumin Seeds, Fenugreek, Asafoetida, Liquorice Root |
-| Dried Fruits | Dried Grapes (Raisins), Dried Apricots, Dried Figs, Dried Pomegranate, Dried Mulberries |
-| Fresh Fruits | Fresh Grapes, Fresh Pomegranate, Melons, Apricots |
-| Carpets & Textiles | Knotted Carpets, Woven Carpets, Kilims |
+| Spices & Herbs | Saffron, Cumin Seeds, Fenugreek, Asafoetida, Liquorice Root, Liquorice Extract |
+| Dried Fruits | Dried Grapes (Raisins), Dried Apricots, Dried Figs, Dried Pomegranate |
+| Fresh Fruits | Fresh Grapes, Fresh Pomegranate, Watermelons, Melons, Apricots, Mulberries (Fresh), Mulberries (Prepared/Frozen) |
+| Carpets & Textiles | Knotted Carpets, Woven Carpets (incl. Kilims) |
 | Luxury Fibres | Raw Cashmere, Processed Cashmere, Cashmere Sweaters, Karakul Sheepskin |
-| Minerals & Stones | Lapis Lazuli, Marble & Travertine, Talc |
+| Minerals & Stones | Lapis Lazuli (Unworked), Lapis Lazuli (Worked), Lapis Lazuli (Articles), Marble & Travertine (Crude), Marble & Travertine (Cut), Talc |
 | Oilseeds | Sesame Seeds, Flaxseed / Linseed |
+
+**Note on Pomegranate (Fresh & Dried):** pomegranate has no dedicated 6-digit HS code in the Harmonized System, despite being one of Afghanistan's major fruit exports. Trade data for these two products is pulled from the closest catch-all categories instead — `081090` ("other fresh fruit, n.e.c.") for Fresh Pomegranate and `081340` ("other dried fruit, n.e.c.") for Dried Pomegranate — so the reported figures include other minor fruits reported under the same catch-all, not pomegranate exclusively.
+
+**Note on Kilims:** kilims do not have their own HS6 code either. Comtrade's `570210` ("woven, not tufted or flocked" carpets) explicitly names kelim/kilim rugs as part of that single category, alongside other flat-woven carpets. Rather than duplicate identical data under two product names, kilims are tracked under **Woven Carpets** rather than as a separate entry.
+
+**Note on Liquorice Root:** the dedicated liquorice-root code (`121110`) is valid but essentially unused by reporters (only 2 global records across 2021-2024). Real root trade is captured instead via `121190`, a broader "other plants n.e.c." catch-all that also includes unrelated goods (ginseng, coca leaf, poppy straw, ephedra), so figures aren't liquorice-exclusive. **Liquorice Extract** (processed liquorice, `130212`) is tracked as a separate product and does not have this issue — it is a precise, liquorice-specific code.
+
+**Note on Mulberries:** no "dried mulberries" code exists anywhere in the Harmonized System — mulberries only appear grouped with raspberries, blackberries and loganberries under a **fresh** heading (`081020`) or a **cooked/frozen** heading (`081120`), never in the dried-fruit chapter. Tracked as two separate products rather than one "Dried Mulberries" entry, since neither code is actually for dried fruit.
+
+**Note on Lapis Lazuli:** lapis lazuli has no HS6 code of its own. It falls under Comtrade's general precious/semi-precious stone categories, which vary by processing stage, so it is tracked as three separate products: `710310` (unworked/roughly shaped), `710399` (worked, not strung/mounted/set), and `711620` (finished articles). Figures for each include other precious/semi-precious stones reported under the same code, not lapis lazuli exclusively.
 
 ---
 
 ## Data sources & methodology
 
+All three sources are driven by `config.py` → `YEARS`, currently `[2021, 2022, 2023, 2024, 2025]`. Each source resolves that requested range differently — see below.
+
 ### Trade data — UN Comtrade (mirror statistics)
 Afghanistan does not report directly to UN Comtrade. Instead, the pipeline uses **mirror statistics**: it queries other countries' import records where Afghanistan is listed as the exporting partner. This is the standard methodology for Afghanistan trade data.
 
+Requested directly for all 5 years in `YEARS`; a given year can come back empty if a reporter hasn't submitted data to Comtrade yet.
+
 ### Market context — World Bank Development Indicators
-The ETL fetches per-country, per-year indicators from the World Bank API:
-- **GDP per capita** (`NY.GDP.PCAP.CD`) — market wealth / purchasing power
+The ETL fetches per-country, per-year indicators from the World Bank API, requested as a single `2021:2025` date range:
+- **GDP** (`NY.GDP.MKTP.CD`) and **GDP per capita** (`NY.GDP.PCAP.CD`) — market wealth / purchasing power
 - **Logistics Performance Index** (`LP.LPI.OVRL.XQ`) — supply-chain connectivity
 - **Regulatory Quality** (`GOV_WGI_RQ.EST`, WGI) — ease of doing business
 - **Political Stability** (`GOV_WGI_PV.EST`, WGI) — market risk
+
+Coverage isn't even across the requested range: LPI is only published in select years, and the WGI indicators typically lag 1–2 years behind the current year. For each market profile, `lpi_score`, `regulatory_quality`, and `political_stability` each resolve independently to the latest year ≤ the profile's `computed_for_year` with a non-null value — `lpi_score_year`, `regulatory_quality_year`, and `political_stability_year` record which year each one actually came from, since they frequently differ from each other and from `computed_for_year`. `gdp_per_capita_usd` doesn't need this: it's published annually with no gaps, so a missing value there means the fetch failed rather than the data not existing — the WB fetch uses a 60s timeout per 20-country batch for exactly this reason (a 30s timeout was previously dropping GDP-per-capita for large batches of countries on slow responses).
 
 ### Tariffs — WITS (World Integrated Trade Solution)
 For each market, the ETL queries the WITS TRN (UNCTAD TRAINS) REST API:
 - Tries **Afghanistan-specific applied rates** first (partner = Afghanistan; captures preferential rates from FTAs) — reported as `AHS`
 - Falls back to **MFN rates** (partner = World) when no Afghanistan-specific data is available — reported as `MFN`
 
-The `tariff_indicator` field on each market profile tells you which series the rate came from.
+WITS tariff data typically lags 2–3 years behind trade data, so the ETL walks backward through `YEARS` (2025 → 2021) per market until it finds a reported schedule. The `tariff_indicator` field on each market profile tells you which series the rate came from, and `tariff_year` tells you the actual year WITS reported that rate for — which is frequently earlier than the market profile's `computed_for_year`, since it reflects whenever that country last reported to TRAINS within the requested window (not necessarily 2025).
 
 ### Static lookups
 - **Distance from Kabul** — approximate straight-line km for ~60 trading partners

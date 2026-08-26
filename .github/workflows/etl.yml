@@ -36,3 +36,13 @@ jobs:
           else
             python -m etl.run
           fi
+
+      - name: Verify data quality
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Internal checks only (fast, DB-only) -- fails the run on real
+        # structural problems (negative values, duplicate supplier codes,
+        # market_share_pct mismatches, out-of-range scores). Does not fail
+        # on source-data gaps like WGI's publishing lag or LPI's non-annual
+        # schedule -- those are logged but expected, see etl/verify.py.
+        run: python -m etl.verify

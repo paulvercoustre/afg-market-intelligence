@@ -25,10 +25,14 @@ export interface ScoreBreakdown {
 export interface MarketContextData {
   gdp_per_capita_usd: number | null
   lpi_score: number | null
+  lpi_score_year: number | null
   regulatory_quality: number | null
+  regulatory_quality_year: number | null
   political_stability: number | null
+  political_stability_year: number | null
   tariff_rate_pct: number | null
   tariff_indicator: string | null
+  tariff_year: number | null
 }
 
 export interface MarketOpportunity {
@@ -45,6 +49,9 @@ export interface MarketOpportunity {
   has_fta: boolean | null
   language_similarity: number | null
   tariff_rate_pct: number | null
+  trade_data_year: number | null
+  afg_last_export_year: number | null
+  afg_last_export_value_usd: number | null
   score_breakdown: ScoreBreakdown
   context: MarketContextData
 }
@@ -68,6 +75,7 @@ export interface GrowthMetrics {
 
 export interface PriceMetrics {
   unit_price_usd: number | null
+  price_basis: string | null
   market_avg_price_usd: number | null
   price_vs_market_pct: number | null
   price_competitiveness: string | null
@@ -80,6 +88,9 @@ export interface MarketIndicator {
   global_market_size_usd: number | null
   market_share_pct: number | null
   afg_supplier_rank: number | null
+  trade_data_year: number | null
+  afg_last_export_year: number | null
+  afg_last_export_value_usd: number | null
   growth: GrowthMetrics
   price: PriceMetrics
 }
@@ -104,6 +115,7 @@ export interface MarketProfile {
   product_name: string | null
   market_code: string
   market_name: string | null
+  computed_for_year: number | null
   opportunity_score: number | null
   score_breakdown: ScoreBreakdown
   context: MarketContextData

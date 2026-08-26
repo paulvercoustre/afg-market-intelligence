@@ -102,14 +102,15 @@ def bulk_upsert_competitor_flows(engine: Engine, rows: list[dict]) -> int:
     sql = text("""
         INSERT INTO competitor_flows
             (product_id, market_code, year,
-             supplier_code, supplier_name, trade_value_usd, trade_quantity)
+             supplier_code, supplier_name, trade_value_usd, trade_quantity, quantity_unit)
         VALUES
             (:product_id, :market_code, :year,
-             :supplier_code, :supplier_name, :trade_value_usd, :trade_quantity)
+             :supplier_code, :supplier_name, :trade_value_usd, :trade_quantity, :quantity_unit)
         ON CONFLICT (product_id, market_code, supplier_code, year) DO UPDATE SET
             supplier_name   = EXCLUDED.supplier_name,
             trade_value_usd = EXCLUDED.trade_value_usd,
-            trade_quantity  = EXCLUDED.trade_quantity
+            trade_quantity  = EXCLUDED.trade_quantity,
+            quantity_unit   = EXCLUDED.quantity_unit
     """)
     with engine.begin() as conn:
         conn.execute(sql, rows)
@@ -152,44 +153,66 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
     """
     Upsert pre-computed indicator rows (including opportunity scores).
     Conflict key: (product_id, market_code, computed_for_year).
+
+    computed_for_year is each market's own latest Comtrade-available year,
+    which can advance between runs (e.g. 2024 -> 2025 once a reporter
+    publishes). Since the conflict key includes that year, a plain upsert
+    would leave the old year's row behind as an orphan instead of replacing
+    it -- so we first delete any existing row for this (product, market)
+    under a different year.
     """
     if not rows:
         return 0
+    delete_stale_sql = text("""
+        DELETE FROM indicators
+        WHERE product_id = :product_id
+          AND market_code = :market_code
+          AND computed_for_year != :computed_for_year
+    """)
     sql = text("""
         INSERT INTO indicators (
-            product_id, market_code, computed_for_year,
+            product_id, market_code, computed_for_year, trade_data_year,
             global_market_size_usd, afg_export_value_usd,
+            afg_last_export_year, afg_last_export_value_usd,
             yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
             first_year, last_year,
             market_share_pct, afg_supplier_rank,
-            unit_price_usd, market_avg_price_usd,
+            unit_price_usd, price_basis, market_avg_price_usd,
             price_vs_market_pct, price_competitiveness,
             opportunity_score, distance_km, has_fta, language_similarity,
-            gdp_per_capita_usd, lpi_score, regulatory_quality, political_stability,
-            tariff_rate_pct, tariff_indicator,
+            gdp_per_capita_usd, lpi_score, lpi_score_year,
+            regulatory_quality, regulatory_quality_year,
+            political_stability, political_stability_year,
+            tariff_rate_pct, tariff_indicator, tariff_year,
             score_market_size, score_market_growth, score_market_quality,
             score_price_competitiveness, score_afg_foothold,
             score_distance, score_language, score_fta, score_tariff,
             computed_at
         ) VALUES (
-            :product_id, :market_code, :computed_for_year,
+            :product_id, :market_code, :computed_for_year, :trade_data_year,
             :global_market_size_usd, :afg_export_value_usd,
+            :afg_last_export_year, :afg_last_export_value_usd,
             :yoy_growth_pct, :cagr_pct, :absolute_growth_usd, :growth_pct,
             :first_year, :last_year,
             :market_share_pct, :afg_supplier_rank,
-            :unit_price_usd, :market_avg_price_usd,
+            :unit_price_usd, :price_basis, :market_avg_price_usd,
             :price_vs_market_pct, :price_competitiveness,
             :opportunity_score, :distance_km, :has_fta, :language_similarity,
-            :gdp_per_capita_usd, :lpi_score, :regulatory_quality, :political_stability,
-            :tariff_rate_pct, :tariff_indicator,
+            :gdp_per_capita_usd, :lpi_score, :lpi_score_year,
+            :regulatory_quality, :regulatory_quality_year,
+            :political_stability, :political_stability_year,
+            :tariff_rate_pct, :tariff_indicator, :tariff_year,
             :score_market_size, :score_market_growth, :score_market_quality,
             :score_price_competitiveness, :score_afg_foothold,
             :score_distance, :score_language, :score_fta, :score_tariff,
             NOW()
         )
         ON CONFLICT (product_id, market_code, computed_for_year) DO UPDATE SET
+            trade_data_year              = EXCLUDED.trade_data_year,
             global_market_size_usd      = EXCLUDED.global_market_size_usd,
             afg_export_value_usd        = EXCLUDED.afg_export_value_usd,
+            afg_last_export_year        = EXCLUDED.afg_last_export_year,
+            afg_last_export_value_usd   = EXCLUDED.afg_last_export_value_usd,
             yoy_growth_pct              = EXCLUDED.yoy_growth_pct,
             cagr_pct                    = EXCLUDED.cagr_pct,
             absolute_growth_usd         = EXCLUDED.absolute_growth_usd,
@@ -199,6 +222,7 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             market_share_pct            = EXCLUDED.market_share_pct,
             afg_supplier_rank           = EXCLUDED.afg_supplier_rank,
             unit_price_usd              = EXCLUDED.unit_price_usd,
+            price_basis                 = EXCLUDED.price_basis,
             market_avg_price_usd        = EXCLUDED.market_avg_price_usd,
             price_vs_market_pct         = EXCLUDED.price_vs_market_pct,
             price_competitiveness       = EXCLUDED.price_competitiveness,
@@ -208,10 +232,14 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             language_similarity         = EXCLUDED.language_similarity,
             gdp_per_capita_usd          = EXCLUDED.gdp_per_capita_usd,
             lpi_score                   = EXCLUDED.lpi_score,
+            lpi_score_year              = EXCLUDED.lpi_score_year,
             regulatory_quality          = EXCLUDED.regulatory_quality,
+            regulatory_quality_year     = EXCLUDED.regulatory_quality_year,
             political_stability         = EXCLUDED.political_stability,
+            political_stability_year    = EXCLUDED.political_stability_year,
             tariff_rate_pct             = EXCLUDED.tariff_rate_pct,
             tariff_indicator            = EXCLUDED.tariff_indicator,
+            tariff_year                 = EXCLUDED.tariff_year,
             score_market_size           = EXCLUDED.score_market_size,
             score_market_growth         = EXCLUDED.score_market_growth,
             score_market_quality        = EXCLUDED.score_market_quality,
@@ -224,6 +252,7 @@ def bulk_upsert_indicators(engine: Engine, rows: list[dict]) -> int:
             computed_at                 = NOW()
     """)
     with engine.begin() as conn:
+        conn.execute(delete_stale_sql, rows)
         conn.execute(sql, rows)
     return len(rows)
 

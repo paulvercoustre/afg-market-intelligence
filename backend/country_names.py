@@ -152,6 +152,7 @@ COUNTRY_NAMES_BY_CODE = {
     "562": "Niger",
     "566": "Nigeria",
     "568": "Other Europe, n.e.s.",
+    "570": "Niue",
     "574": "Norfolk Island",
     "577": "Other Oceania, n.e.s.",
     "579": "Norway",
@@ -231,7 +232,14 @@ COUNTRY_NAMES_BY_CODE = {
 
 
 def resolve_country_name(country_code: Any, candidate: Any = None) -> str | None:
-    """Return a displayable country name for a Comtrade market code."""
+    """
+    Return a displayable country name for a Comtrade market code.
+
+    Falls back to "Unknown ({code})" rather than None for any code not in
+    COUNTRY_NAMES_BY_CODE and not resolved from Comtrade's own description --
+    callers (e.g. competitor_flows.supplier_name) rely on a non-null result,
+    and the static table can't guarantee full UN M49 coverage.
+    """
     cleaned = _clean_candidate(candidate)
     if cleaned:
         return cleaned
@@ -248,7 +256,7 @@ def resolve_country_name(country_code: Any, candidate: Any = None) -> str | None
         name = COUNTRY_NAMES_BY_CODE.get(variant)
         if name:
             return name
-    return None
+    return f"Unknown ({code})"
 
 
 def _clean_candidate(value: Any) -> str | None:

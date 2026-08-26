@@ -104,6 +104,7 @@ def create_tables():
                 supplier_name TEXT NOT NULL,
                 trade_value_usd REAL,
                 trade_quantity REAL,
+                quantity_unit TEXT,
                 UNIQUE(product_id, market_code, supplier_code, year)
             )
         """))
@@ -113,8 +114,11 @@ def create_tables():
                 product_id INTEGER NOT NULL,
                 market_code TEXT NOT NULL,
                 computed_for_year INTEGER NOT NULL,
+                trade_data_year INTEGER,
                 global_market_size_usd REAL,
                 afg_export_value_usd REAL,
+                afg_last_export_year INTEGER,
+                afg_last_export_value_usd REAL,
                 yoy_growth_pct REAL,
                 cagr_pct REAL,
                 absolute_growth_usd REAL,
@@ -124,6 +128,7 @@ def create_tables():
                 market_share_pct REAL,
                 afg_supplier_rank INTEGER,
                 unit_price_usd REAL,
+                price_basis TEXT,
                 market_avg_price_usd REAL,
                 price_vs_market_pct REAL,
                 price_competitiveness TEXT,
@@ -133,10 +138,14 @@ def create_tables():
                 language_similarity REAL,
                 gdp_per_capita_usd REAL,
                 lpi_score REAL,
+                lpi_score_year INTEGER,
                 regulatory_quality REAL,
+                regulatory_quality_year INTEGER,
                 political_stability REAL,
+                political_stability_year INTEGER,
                 tariff_rate_pct REAL,
                 tariff_indicator TEXT,
+                tariff_year INTEGER,
                 score_market_size REAL,
                 score_market_growth REAL,
                 score_market_quality REAL,
@@ -185,34 +194,41 @@ def seeded_db():
         ))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
                 opportunity_score, distance_km, has_fta, language_similarity,
-                gdp_per_capita_usd, lpi_score, regulatory_quality, political_stability,
-                tariff_rate_pct, tariff_indicator,
+                gdp_per_capita_usd, lpi_score, lpi_score_year,
+                regulatory_quality, regulatory_quality_year,
+                political_stability, political_stability_year,
+                tariff_rate_pct, tariff_indicator, tariff_year,
                 score_market_size, score_market_growth, score_market_quality,
                 score_price_competitiveness, score_afg_foothold,
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '699', 2024,
+                p.id, '699', 2024, 2024,
                 1500000, 50000000,
+                2024, 1500000,
                 3.0, 2,
                 10.5, 8.2, 200000, 15.4,
                 2021, 2024, 'Competitive',
                 72.5, 1000, 0, 0.2,
-                2200, 3.5, 0.8, 0.5,
-                30.0, 'AHS',
+                2200, 3.5, 2022,
+                0.8, 2024,
+                0.5, 2024,
+                30.0, 'AHS', 2022,
                 65.0, 60.0, 70.0, 75.0, 45.0, 93.0, 20.0, 0.0, 10.0
             FROM products p WHERE p.name = 'Saffron'
         """))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
@@ -224,8 +240,9 @@ def seeded_db():
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '276', 2024,
+                p.id, '276', 2024, 2024,
                 800000, 80000000,
+                2024, 800000,
                 1.0, 5,
                 5.0, 4.2, 80000, 10.4,
                 2021, 2024, 'Average',
@@ -241,8 +258,9 @@ def seeded_db():
         ))
         db.execute(text("""
             INSERT OR IGNORE INTO indicators (
-                product_id, market_code, computed_for_year,
+                product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
@@ -254,8 +272,9 @@ def seeded_db():
                 score_distance, score_language, score_fta, score_tariff
             )
             SELECT
-                p.id, '144', 2024,
+                p.id, '144', 2024, NULL,
                 NULL, 90000000,
+                NULL, NULL,
                 NULL, NULL,
                 NULL, NULL, NULL, NULL,
                 2021, 2024, 'Average',
@@ -334,6 +353,7 @@ class TestProductDetail:
             assert "yoy_growth_pct" in m["growth"]
             assert "cagr_pct" in m["growth"]
             assert "unit_price_usd" in m["price"]
+            assert "price_basis" in m["price"]
 
 
 class TestMarketDetail:
@@ -348,6 +368,19 @@ class TestMarketDetail:
         assert "market_code" in body
         assert "competitors" in body
         assert "trade_history" in body
+
+    def test_market_indicator_includes_afg_last_export_fields(self, client, seeded_db):
+        """
+        Regression test for the same class of bug the trade_data_year round-trip
+        test in etl/tests/test_load.py guards against: a column added to
+        models.py/schemas.py but missed in a service layer's SELECT/mapping
+        would silently come back as null even when the DB has real data.
+        """
+        r = client.get("/api/products/091020/markets/699")
+        assert r.status_code == 200
+        indicator = r.json()["indicator"]
+        assert indicator["afg_last_export_year"] == 2024
+        assert indicator["afg_last_export_value_usd"] == pytest.approx(1_500_000)
 
 
 class TestIndicatorDefinitions:
@@ -421,9 +454,10 @@ class TestDiscovery:
         markets = r.json()["markets"]
         assert len(markets) > 0
         ctx = markets[0]["context"]
-        for key in ("gdp_per_capita_usd", "lpi_score",
-                    "regulatory_quality", "political_stability",
-                    "tariff_rate_pct", "tariff_indicator"):
+        for key in ("gdp_per_capita_usd", "lpi_score", "lpi_score_year",
+                    "regulatory_quality", "regulatory_quality_year",
+                    "political_stability", "political_stability_year",
+                    "tariff_rate_pct", "tariff_indicator", "tariff_year"):
             assert key in ctx
 
     def test_market_row_has_tariff(self, client, seeded_db):
@@ -434,6 +468,14 @@ class TestDiscovery:
         assert india is not None
         assert india["tariff_rate_pct"] == 30.0
         assert india["context"]["tariff_indicator"] == "AHS"
+        # Seeded with computed_for_year=2024 but tariff_year=2022 -- WITS
+        # lag means the rate can be older than the indicator row itself.
+        assert india["context"]["tariff_year"] == 2022
+        # Same idea for World Bank fields: seeded with lpi_score_year=2022
+        # (older, triennial survey) vs. regulatory/political _year=2024.
+        assert india["context"]["lpi_score_year"] == 2022
+        assert india["context"]["regulatory_quality_year"] == 2024
+        assert india["context"]["political_stability_year"] == 2024
 
     def test_high_tariff_market_gets_low_tariff_score(self, client, seeded_db):
         r = client.get("/api/discover/091020")

@@ -16,11 +16,13 @@ import pandas as pd
 from backend.country_names import resolve_country_name
 from config import (
     DISTANCE_FROM_KABUL_KM,
-    FTA_STATUS,
     LANGUAGE_SIMILARITY,
     LANGUAGE_SIMILARITY_DEFAULT,
+    MAX_GREAT_CIRCLE_DISTANCE_KM,
+    NATIVE_UNIT_PRICE_BASES,
     OPPORTUNITY_SCORE_WEIGHTS,
     PRICE_COMPETITIVENESS,
+    PRICE_OUTLIER_BAND_MULTIPLIER,
     TARIFF_SCORE_PER_PCT,
 )
 
@@ -94,6 +96,7 @@ def to_competitor_flows(global_df: pd.DataFrame, product_id: int, market_codes: 
             "supplier_name": supplier_name,
             "trade_value_usd": _float_or_none(r.get("primaryValue")),
             "trade_quantity": qty,
+            "quantity_unit": r.get("quantity_unit"),
         })
     return rows
 
@@ -129,11 +132,26 @@ def compute_indicators(
 
         market_world = world_totals[world_totals["reporterCode"] == market_code].copy()
 
-        # Global market size (latest year)
-        global_market_size = _sum_year(market_world, "primaryValue", latest_year)
+        # Trade fields target this market's own most recent reported year,
+        # at or before latest_year -- falling back the same way
+        # _latest_wb_context() already does for World Bank fields, so a
+        # market whose latest_year submission hasn't landed at Comtrade yet
+        # reuses its own last known year instead of coming back empty (and
+        # dragging the score down for a reason that has nothing to do with
+        # the market's actual attractiveness).
+        trade_data_year = _resolve_trade_year(market_world, afg_to_market, latest_year)
 
-        # Afghanistan's export value to this market (latest year)
-        afg_value_latest = _sum_year(afg_to_market, "trade_value_usd", latest_year)
+        # Global market size (trade_data_year)
+        global_market_size = _sum_year(market_world, "primaryValue", trade_data_year)
+
+        # Afghanistan's export value to this market (trade_data_year)
+        afg_value_latest = _sum_year(afg_to_market, "trade_value_usd", trade_data_year)
+
+        # Afghanistan's own most recent export year to this market, independent
+        # of trade_data_year -- see _resolve_afg_last_export() docstring.
+        afg_last_export_year, afg_last_export_value = _resolve_afg_last_export(
+            afg_to_market, latest_year
+        )
 
         # Growth metrics
         growth = _growth_metrics(afg_to_market, years)
@@ -146,22 +164,30 @@ def compute_indicators(
         )
 
         # Afghanistan's rank among all suppliers to this market
-        afg_rank = _afg_rank(global_df, market_code, afg_value_latest, latest_year)
+        afg_rank = _afg_rank(global_df, market_code, afg_value_latest, trade_data_year)
 
-        # Unit price
-        unit_price = _unit_price(afg_to_market, latest_year)
+        # Unit price -- basis is net_weight_kg unless every one of
+        # Afghanistan's own rows for this year agrees on one of
+        # NATIVE_UNIT_PRICE_BASES (see config.py), e.g. carpets priced by m²
+        unit_price, price_basis = _unit_price(afg_to_market, trade_data_year)
 
-        # Market average price and competitiveness
+        # Market average price and competitiveness -- computed on the SAME
+        # basis as unit_price, so the comparison is apples-to-apples; a
+        # competitor that doesn't share that basis is excluded rather than
+        # silently mixed in on a different unit.
         market_avg_price, price_vs_market_pct, competitiveness = _price_competitiveness(
-            global_df, market_code, unit_price, latest_year
+            global_df, market_code, unit_price, price_basis, trade_data_year
         )
 
         rows.append({
             "product_id": product_id,
             "market_code": market_code,
             "computed_for_year": latest_year,
+            "trade_data_year": trade_data_year,
             "global_market_size_usd": _float_or_none(global_market_size),
             "afg_export_value_usd": _float_or_none(afg_value_latest),
+            "afg_last_export_year": afg_last_export_year,
+            "afg_last_export_value_usd": _float_or_none(afg_last_export_value),
             "yoy_growth_pct": _float_or_none(growth["yoy"]),
             "cagr_pct": _float_or_none(growth["cagr"]),
             "absolute_growth_usd": _float_or_none(growth["absolute"]),
@@ -171,6 +197,7 @@ def compute_indicators(
             "market_share_pct": _float_or_none(market_share_pct),
             "afg_supplier_rank": afg_rank,
             "unit_price_usd": _float_or_none(unit_price),
+            "price_basis": price_basis,
             "market_avg_price_usd": _float_or_none(market_avg_price),
             "price_vs_market_pct": _float_or_none(price_vs_market_pct),
             "price_competitiveness": competitiveness,
@@ -191,12 +218,88 @@ def _float_or_none(v: Any) -> float | None:
         return None
 
 
+def _resolve_trade_year(
+    market_world: pd.DataFrame, afg_to_market: pd.DataFrame, up_to_year: int
+) -> int | None:
+    """
+    The most recent year <= up_to_year that this market has *any* reported
+    data for -- its own global-import totals or Afghanistan's exports to it.
+    Comtrade reporters submit a full year's trade lines at once, so "this
+    market's global totals exist for year Y" is a reliable signal that Y is
+    a real reporting year for it, not just a year we happened to ask about.
+    """
+    years_with_data: set[int] = set()
+    if not market_world.empty:
+        years_with_data |= set(pd.to_numeric(market_world["year"], errors="coerce").dropna().astype(int))
+    if not afg_to_market.empty:
+        years_with_data |= set(pd.to_numeric(afg_to_market["year"], errors="coerce").dropna().astype(int))
+    eligible = [y for y in years_with_data if y <= up_to_year]
+    return max(eligible) if eligible else None
+
+
+# A country genuinely halting Afghan imports is real signal worth showing as a
+# zero for the current year (see _resolve_trade_year above) -- but reusing an
+# arbitrarily old year to paper over that would misrepresent Afghanistan's
+# *current* presence. This floor bounds how far back "last known export year"
+# is allowed to look, so a market with, say, a single small shipment in 2019
+# and nothing since doesn't get displayed as if it were still active.
+AFG_LAST_EXPORT_FLOOR_YEAR = 2022
+
+
+def _resolve_afg_last_export(
+    afg_to_market: pd.DataFrame, up_to_year: int, floor_year: int = AFG_LAST_EXPORT_FLOOR_YEAR
+) -> tuple[int | None, float | None]:
+    """
+    The most recent year (floor_year <= year <= up_to_year) that Afghanistan
+    has any recorded export value to this market, and the value for that year.
+
+    Independent of trade_data_year: trade_data_year anchors global_market_size_usd
+    and afg_export_value_usd to the market's own current reporting year so
+    market_share_pct/afg_supplier_rank stay same-year, apples-to-apples
+    comparisons -- including a genuine zero when Afghanistan simply isn't in
+    that year's partner breakdown. This instead answers "when did Afghanistan
+    last actually show up here at all," purely for display, so a genuine
+    current-year zero isn't shown to the user as if no data existed at all.
+    """
+    if afg_to_market.empty:
+        return None, None
+    yearly = afg_to_market.groupby("year")["trade_value_usd"].sum().reset_index()
+    yearly["year"] = pd.to_numeric(yearly["year"], errors="coerce")
+    yearly = yearly.dropna(subset=["year"])
+    yearly["year"] = yearly["year"].astype(int)
+    eligible = yearly[
+        (yearly["year"] >= floor_year)
+        & (yearly["year"] <= up_to_year)
+        & (yearly["trade_value_usd"] > 0)
+    ]
+    if eligible.empty:
+        return None, None
+    row = eligible.sort_values("year").iloc[-1]
+    return int(row["year"]), float(row["trade_value_usd"])
+
+
 def _sum_year(df: pd.DataFrame, col: str, year: int) -> float | None:
     sub = df[df["year"] == year]
     if sub.empty or col not in sub.columns:
         return None
     total = pd.to_numeric(sub[col], errors="coerce").sum()
     return float(total) if total > 0 else None
+
+
+
+# indicators.{yoy_growth_pct,cagr_pct,growth_pct} are NUMERIC(10,4) -- a growth
+# rate off a near-zero prior-year base can produce a percentage in the
+# millions, which overflows that column and (since these rows are upserted in
+# a single multi-row INSERT) fails the whole product's batch. Such a number
+# isn't meaningful growth data anyway, so treat it as undefined rather than
+# storing a nonsensical figure.
+_MAX_PCT_MAGNITUDE = 999_999.0
+
+
+def _safe_pct(value: float | None) -> float | None:
+    if value is None or math.isnan(value) or math.isinf(value):
+        return None
+    return value if abs(value) <= _MAX_PCT_MAGNITUDE else None
 
 
 def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
@@ -232,8 +335,8 @@ def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
     pct = (absolute / first_val * 100) if first_val > 0 else None
 
     return {
-        "yoy": yoy, "cagr": cagr, "absolute": absolute, "pct": pct,
-        "first_year": first_year, "last_year": last_year,
+        "yoy": _safe_pct(yoy), "cagr": _safe_pct(cagr), "absolute": absolute,
+        "pct": _safe_pct(pct), "first_year": first_year, "last_year": last_year,
     }
 
 
@@ -253,28 +356,67 @@ def _afg_rank(global_df: pd.DataFrame, market_code: str,
     return int(higher) + 1
 
 
-def _unit_price(afg_df: pd.DataFrame, year: int) -> float | None:
+def _native_unit_basis(sub: pd.DataFrame) -> str | None:
+    """
+    Returns the single unit every row in `sub` agrees on, if it's one of
+    NATIVE_UNIT_PRICE_BASES (config.py) -- e.g. carpets reported in m² --
+    else None. Requires unanimous agreement: a product/market/year where
+    even one row reports a different (or missing) unit falls back to
+    net_weight_kg rather than risk mixing bases.
+    """
+    units = sub.get("quantity_unit", pd.Series(dtype=object)).dropna().unique()
+    if len(units) == 1 and units[0] in NATIVE_UNIT_PRICE_BASES:
+        return units[0]
+    return None
+
+
+def _unit_price(afg_df: pd.DataFrame, year: int) -> tuple[float | None, str | None]:
+    """
+    Returns (price_per_unit, basis) where basis is either one of
+    NATIVE_UNIT_PRICE_BASES (e.g. "m²") or "kg" (net_weight_kg), or
+    (None, None) if no price could be computed on either basis.
+    """
     sub = afg_df[afg_df["year"] == year]
     if sub.empty:
-        return None
+        return None, None
     value = pd.to_numeric(sub["trade_value_usd"], errors="coerce").sum()
-    qty = pd.to_numeric(sub.get("trade_quantity", pd.Series(dtype=float)), errors="coerce").sum()
-    if qty and qty > 0:
-        return float(value / qty)
-    # Fall back to net weight
+
+    native_unit = _native_unit_basis(sub)
+    if native_unit is not None:
+        qty = pd.to_numeric(sub.get("trade_quantity", pd.Series(dtype=float)), errors="coerce").sum()
+        if qty and qty > 0:
+            return float(value / qty), native_unit
+
+    # net_weight_kg fallback -- deliberately NO fallback to the free-form
+    # "quantity" field beyond the NATIVE_UNIT_PRICE_BASES allowlist above
+    # (kg, m^2, pieces, ... depending on the reporter, with no reliable unit
+    # label in the general case). A blanket fallback would silently
+    # reintroduce the cross-country unit mismatch this is meant to prevent
+    # (see DATA_SPECIFICATION.md §4.5 and Berthou & Emlinger, "The Trade
+    # Unit Values Database", CEPII Working Paper 2011-10, §2.2). Better to
+    # leave the price comparison undetermined -- None propagates through
+    # _price_competitiveness() and surfaces as "no unit data for comparison"
+    # in the UI -- than to compute one on a basis we can't verify.
     wt = pd.to_numeric(sub.get("net_weight_kg", pd.Series(dtype=float)), errors="coerce").sum()
     if wt and wt > 0:
-        return float(value / wt)
-    return None
+        return float(value / wt), "kg"
+    return None, None
 
 
 def _price_competitiveness(
     global_df: pd.DataFrame,
     market_code: str,
     afg_price: float | None,
+    afg_basis: str | None,
     year: int,
 ) -> tuple[float | None, float | None, str | None]:
-    if afg_price is None or global_df.empty:
+    """
+    afg_basis (from _unit_price()) is either "kg" or one of
+    NATIVE_UNIT_PRICE_BASES -- competitor prices are computed on that SAME
+    basis, so the comparison stays apples-to-apples. A competitor reporting
+    a different (or no) unit is excluded rather than silently mixed in.
+    """
+    if afg_price is None or afg_basis is None or global_df.empty:
         return None, None, None
 
     suppliers = global_df[
@@ -286,15 +428,52 @@ def _price_competitiveness(
         return None, None, None
 
     suppliers["_val"] = pd.to_numeric(suppliers["primaryValue"], errors="coerce")
-    suppliers["_qty"] = pd.to_numeric(
-        suppliers.get("qty", pd.Series(dtype=float)), errors="coerce"
-    )
-    suppliers["_price"] = suppliers.apply(
-        lambda r: r["_val"] / r["_qty"] if r["_qty"] > 0 else None, axis=1
-    )
-    valid = suppliers["_price"].dropna()
+
+    if afg_basis in NATIVE_UNIT_PRICE_BASES:
+        on_basis = suppliers[suppliers.get("quantity_unit") == afg_basis].copy()
+        on_basis["_qty"] = pd.to_numeric(on_basis.get("qty", pd.Series(dtype=float)), errors="coerce")
+        on_basis["_price"] = on_basis.apply(
+            lambda r: r["_val"] / r["_qty"] if r["_qty"] > 0 else None, axis=1
+        )
+        valid = on_basis["_price"].dropna()
+    else:
+        # Net weight (kg) only -- same reasoning as _unit_price(): no fallback
+        # to the free-form "quantity" field. A supplier that didn't report
+        # net weight is excluded from the comparison entirely (its _price
+        # stays None and gets dropped below) rather than being included on a
+        # potentially incompatible unit basis.
+        suppliers["_wt"] = pd.to_numeric(
+            suppliers.get("netWgt", pd.Series(dtype=float)), errors="coerce"
+        )
+        suppliers["_price"] = suppliers.apply(
+            lambda r: r["_val"] / r["_wt"] if r["_wt"] > 0 else None, axis=1
+        )
+        valid = suppliers["_price"].dropna()
+
     if valid.empty:
         return None, None, None
+
+    # Comtrade lets each reporter submit "quantity" in whatever unit its own
+    # customs system uses (kg, m^2, pieces, ...) with no reliable unit label
+    # (qtyUnitAbbr is frequently blank) -- so dividing value/quantity across
+    # suppliers can silently mix incompatible units, producing wild implied
+    # "prices" that are really just unit mismatches (e.g. one HS6 code, one
+    # market, one year: $11/unit to $5,834/unit across suppliers). We can't
+    # recover the true unit, but a unit-mismatched supplier is a stark outlier
+    # against the rest, who are more likely reporting comparably -- so filter
+    # by distance from the median before averaging, the same outlier band
+    # CEPII uses when cleaning raw Comtrade data for this exact reason (an
+    # observation is dropped if it exceeds median*10 or is below median/10;
+    # see Berthou & Emlinger, "The Trade Unit Values Database", CEPII Working
+    # Paper 2011-10, Appendix A2).
+    median_price = float(valid.median())
+    if median_price > 0:
+        filtered = valid[
+            (valid >= median_price / PRICE_OUTLIER_BAND_MULTIPLIER)
+            & (valid <= median_price * PRICE_OUTLIER_BAND_MULTIPLIER)
+        ]
+        if not filtered.empty:
+            valid = filtered
 
     market_avg = float(valid.mean())
     pct_diff = (afg_price - market_avg) / market_avg * 100 if market_avg > 0 else None
@@ -346,11 +525,9 @@ def enrich_indicators_with_scores(
 
         # ── Static lookups ────────────────────────────────────────────────────
         dist_km = DISTANCE_FROM_KABUL_KM.get(mc)
-        fta = FTA_STATUS.get(mc)
         lang = LANGUAGE_SIMILARITY.get(mc, LANGUAGE_SIMILARITY_DEFAULT)
 
         row["distance_km"] = dist_km
-        row["has_fta"] = fta is not None
         row["language_similarity"] = lang
 
         # ── World Bank context (latest available year ≤ computed year) ────────
@@ -358,24 +535,43 @@ def enrich_indicators_with_scores(
         ctx = _latest_wb_context(ctx_by_year, year)
         row["gdp_per_capita_usd"] = ctx.get("gdp_per_capita_usd")
         row["lpi_score"] = ctx.get("lpi_score")
+        row["lpi_score_year"] = ctx.get("lpi_score_year")
         row["regulatory_quality"] = ctx.get("regulatory_quality")
+        row["regulatory_quality_year"] = ctx.get("regulatory_quality_year")
         row["political_stability"] = ctx.get("political_stability")
+        row["political_stability_year"] = ctx.get("political_stability_year")
 
         # ── Tariff (WITS) ─────────────────────────────────────────────────────
         tariff_info = tariffs.get(mc) or {}
         tariff_rate = tariff_info.get("rate")
         row["tariff_rate_pct"] = tariff_rate
         row["tariff_indicator"] = tariff_info.get("indicator")
+        row["tariff_year"] = tariff_info.get("year")
+
+        # 'AHS' means WITS has an Afghanistan-specific applied-tariff record on
+        # file for this reporter (partner=004, vs the generic partner=000 MFN
+        # rate) -- a real signal of differentiated trade treatment, sourced
+        # live from the same WITS fetch as tariff_rate_pct rather than a
+        # hand-maintained "which FTAs is Afghanistan in" dict. It doesn't
+        # guarantee this specific product's AHS rate is lower than MFN (we
+        # only fetch MFN as a fallback when AHS is unavailable, not always
+        # both, so there's nothing to compare against for AHS rows) -- but
+        # that actual rate, whichever indicator it came from, is already
+        # fully priced into score_tariff below.
+        has_fta = tariff_info.get("indicator") == "AHS"
+        row["has_fta"] = has_fta
 
         # ── Dimension scores (0–100) ─────────────────────────────────────────
         s_size = _score_market_size(row.get("global_market_size_usd"), log_max)
         s_growth = _score_growth(row.get("cagr_pct"))
         s_quality = _score_market_quality(ctx)
         s_price = _score_price(row.get("price_competitiveness"))
-        s_foothold = _score_foothold(row.get("afg_export_value_usd"))
+        s_foothold = _score_foothold(
+            row.get("afg_export_value_usd"), row.get("afg_last_export_value_usd")
+        )
         s_distance = _score_distance(dist_km)
         s_language = lang * 100
-        s_fta = 100.0 if fta else 0.0
+        s_fta = 100.0 if has_fta else 0.0
         s_tariff = _score_tariff(tariff_rate)
 
         row["score_market_size"] = round(s_size, 2)
@@ -388,6 +584,10 @@ def enrich_indicators_with_scores(
         row["score_fta"] = round(s_fta, 2)
         row["score_tariff"] = round(s_tariff, 2)
 
+        # score_fta/has_fta are still computed and stored above for every row
+        # (in case WITS's AFG-specific tariff coverage improves), but not
+        # weighted into the composite -- see config.py's OPPORTUNITY_SCORE_WEIGHTS
+        # comment for why (WITS has_fta is currently False for 100% of rows).
         composite = (
             s_size * weights["market_size"]
             + s_growth * weights["market_growth"]
@@ -397,7 +597,6 @@ def enrich_indicators_with_scores(
             + s_foothold * weights["afg_foothold"]
             + s_distance * weights["distance"]
             + s_language * weights["language"]
-            + s_fta * weights["fta_status"]
         )
         row["opportunity_score"] = round(composite, 2)
 
@@ -411,6 +610,11 @@ def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
     Fields are resolved independently because indicators refresh on different
     cycles — e.g. the LPI survey is triennial, so the latest year's record may
     have GDP but a null LPI while an earlier year has the survey value.
+
+    Also returns a '{field}_year' entry alongside each resolved field, giving
+    the actual year that value came from -- without it, a caller can't tell a
+    fresh value from one that's several years stale (the same problem
+    tariff_year solves for WITS rates).
     """
     eligible_years = sorted((yr for yr in ctx_by_year if yr <= up_to_year), reverse=True)
     merged: dict = {}
@@ -418,6 +622,7 @@ def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
         for field, value in ctx_by_year[yr].items():
             if value is not None and field not in merged:
                 merged[field] = value
+                merged[f"{field}_year"] = yr
     return merged
 
 
@@ -460,19 +665,44 @@ def _score_price(competitiveness: str | None) -> float:
     return mapping.get(competitiveness or "", 50.0)
 
 
-def _score_foothold(afg_value: float | None) -> float:
-    """Existing Afghan presence signals market acceptance."""
-    if afg_value is None or afg_value <= 0:
-        return 25.0  # untapped — still plausible, but penalised
-    # Log-scale: $10k → ~25, $1M → ~60, $10M → ~75, $100M → ~90
-    return min(100.0, math.log10(afg_value + 1) * 14)
+def _score_foothold(afg_value: float | None, afg_last_export_value: float | None = None) -> float:
+    """
+    Existing Afghan presence signals market acceptance.
+
+    afg_value is this year's figure -- the same one used everywhere else,
+    including a genuine current-year zero when Afghanistan isn't in this
+    year's partner breakdown (see _resolve_afg_last_export()'s docstring).
+    A genuine zero shouldn't score identically to a market with no Afghan
+    trade history at all, though: when afg_value is missing/zero but
+    Afghanistan has a recent bounded-year export on record
+    (afg_last_export_value, see AFG_LAST_EXPORT_FLOOR_YEAR), that's still
+    real evidence of market acceptance -- score it, just at a discount
+    (0.7x) versus an active current-year presence.
+    """
+    if afg_value is not None and afg_value > 0:
+        # Log-scale: $10k → ~25, $1M → ~60, $10M → ~75, $100M → ~90
+        return min(100.0, math.log10(afg_value + 1) * 14)
+    if afg_last_export_value is not None and afg_last_export_value > 0:
+        return min(90.0, math.log10(afg_last_export_value + 1) * 14 * 0.7)
+    return 0.0  # no Afghan trade on record at all, current or historical
 
 
 def _score_distance(dist_km: int | None) -> float:
-    """Closer is better. 0 km → 100, 15 000 km → 0."""
+    """
+    Closer is better, log-scaled: 0 km → 100, MAX_GREAT_CIRCLE_DISTANCE_KM → 0.
+
+    Log rather than linear because trade/transport costs scale with the
+    *ratio* of distance, not the absolute km gap (the standard gravity-model
+    treatment -- see MAX_GREAT_CIRCLE_DISTANCE_KM's definition in config.py).
+    A neighbor at 400km vs. a market 3.5x farther at 1400km loses meaningfully
+    more score than two far markets 1000km apart at 9000km vs. 10000km (only
+    11% farther), even though both pairs differ by the same 1000km.
+    """
     if dist_km is None:
         return 50.0  # neutral default
-    return max(0.0, 100.0 - dist_km / 150)
+    if dist_km <= 0:
+        return 100.0
+    return max(0.0, 100.0 * (1 - math.log1p(dist_km) / math.log1p(MAX_GREAT_CIRCLE_DISTANCE_KM)))
 
 
 def _score_tariff(rate_pct: float | None) -> float:

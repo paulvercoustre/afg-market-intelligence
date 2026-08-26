@@ -37,10 +37,13 @@ def get_ranked_markets(
             i.market_code,
             m.country_name       AS market_name,
             i.computed_for_year,
+            i.trade_data_year,
             i.opportunity_score,
             i.global_market_size_usd,
             i.cagr_pct,
             i.afg_export_value_usd,
+            i.afg_last_export_year,
+            i.afg_last_export_value_usd,
             i.market_share_pct,
             i.price_competitiveness,
             i.distance_km,
@@ -48,6 +51,7 @@ def get_ranked_markets(
             i.language_similarity,
             i.tariff_rate_pct,
             i.tariff_indicator,
+            i.tariff_year,
             i.score_market_size,
             i.score_market_growth,
             i.score_market_quality,
@@ -59,8 +63,11 @@ def get_ranked_markets(
             i.score_tariff,
             i.gdp_per_capita_usd,
             i.lpi_score,
+            i.lpi_score_year,
             i.regulatory_quality,
-            i.political_stability
+            i.regulatory_quality_year,
+            i.political_stability,
+            i.political_stability_year
         FROM indicators i
         LEFT JOIN markets m ON m.country_code = i.market_code
         WHERE i.product_id = :product_id
@@ -86,12 +93,15 @@ def get_ranked_markets(
             "global_market_size_usd": _f(r["global_market_size_usd"]),
             "cagr_pct": _f(r["cagr_pct"]),
             "afg_export_value_usd": _f(r["afg_export_value_usd"]),
+            "afg_last_export_year": r["afg_last_export_year"],
+            "afg_last_export_value_usd": _f(r["afg_last_export_value_usd"]),
             "market_share_pct": _f(r["market_share_pct"]),
             "price_competitiveness": r["price_competitiveness"],
             "distance_km": r["distance_km"],
             "has_fta": r["has_fta"],
             "language_similarity": _f(r["language_similarity"]),
             "tariff_rate_pct": _f(r["tariff_rate_pct"]),
+            "trade_data_year": r["trade_data_year"],
             "score_breakdown": {
                 "market_size": _f(r["score_market_size"]),
                 "market_growth": _f(r["score_market_growth"]),
@@ -106,10 +116,14 @@ def get_ranked_markets(
             "context": {
                 "gdp_per_capita_usd": _f(r["gdp_per_capita_usd"]),
                 "lpi_score": _f(r["lpi_score"]),
+                "lpi_score_year": r["lpi_score_year"],
                 "regulatory_quality": _f(r["regulatory_quality"]),
+                "regulatory_quality_year": r["regulatory_quality_year"],
                 "political_stability": _f(r["political_stability"]),
+                "political_stability_year": r["political_stability_year"],
                 "tariff_rate_pct": _f(r["tariff_rate_pct"]),
                 "tariff_indicator": r["tariff_indicator"],
+                "tariff_year": r["tariff_year"],
             },
         })
 
@@ -185,6 +199,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         "product_name": product_name,
         "market_code": market_code,
         "market_name": market_name,
+        "computed_for_year": row["computed_for_year"],
         "opportunity_score": _f(row["opportunity_score"]),
         "score_breakdown": {
             "market_size": _f(row["score_market_size"]),
@@ -200,10 +215,14 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
         "context": {
             "gdp_per_capita_usd": _f(row["gdp_per_capita_usd"]),
             "lpi_score": _f(row["lpi_score"]),
+            "lpi_score_year": row["lpi_score_year"],
             "regulatory_quality": _f(row["regulatory_quality"]),
+            "regulatory_quality_year": row["regulatory_quality_year"],
             "political_stability": _f(row["political_stability"]),
+            "political_stability_year": row["political_stability_year"],
             "tariff_rate_pct": _f(row["tariff_rate_pct"]),
             "tariff_indicator": row["tariff_indicator"],
+            "tariff_year": row["tariff_year"],
         },
         "trade": {
             "market_code": market_code,
@@ -212,6 +231,9 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
             "global_market_size_usd": _f(row["global_market_size_usd"]),
             "market_share_pct": _f(row["market_share_pct"]),
             "afg_supplier_rank": row["afg_supplier_rank"],
+            "trade_data_year": row["trade_data_year"],
+            "afg_last_export_year": row["afg_last_export_year"],
+            "afg_last_export_value_usd": _f(row["afg_last_export_value_usd"]),
             "growth": {
                 "yoy_growth_pct": _f(row["yoy_growth_pct"]),
                 "cagr_pct": _f(row["cagr_pct"]),
@@ -222,6 +244,7 @@ def get_market_profile(db: Session, hs_code: str, market_code: str) -> dict | No
             },
             "price": {
                 "unit_price_usd": _f(row["unit_price_usd"]),
+                "price_basis": row["price_basis"],
                 "market_avg_price_usd": _f(row["market_avg_price_usd"]),
                 "price_vs_market_pct": _f(row["price_vs_market_pct"]),
                 "price_competitiveness": row["price_competitiveness"],
