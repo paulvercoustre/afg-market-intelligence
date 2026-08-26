@@ -116,6 +116,8 @@ def create_tables():
                 trade_data_year INTEGER,
                 global_market_size_usd REAL,
                 afg_export_value_usd REAL,
+                afg_last_export_year INTEGER,
+                afg_last_export_value_usd REAL,
                 yoy_growth_pct REAL,
                 cagr_pct REAL,
                 absolute_growth_usd REAL,
@@ -192,6 +194,7 @@ def seeded_db():
             INSERT OR IGNORE INTO indicators (
                 product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
@@ -207,6 +210,7 @@ def seeded_db():
             SELECT
                 p.id, '699', 2024, 2024,
                 1500000, 50000000,
+                2024, 1500000,
                 3.0, 2,
                 10.5, 8.2, 200000, 15.4,
                 2021, 2024, 'Competitive',
@@ -222,6 +226,7 @@ def seeded_db():
             INSERT OR IGNORE INTO indicators (
                 product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
@@ -235,6 +240,7 @@ def seeded_db():
             SELECT
                 p.id, '276', 2024, 2024,
                 800000, 80000000,
+                2024, 800000,
                 1.0, 5,
                 5.0, 4.2, 80000, 10.4,
                 2021, 2024, 'Average',
@@ -252,6 +258,7 @@ def seeded_db():
             INSERT OR IGNORE INTO indicators (
                 product_id, market_code, computed_for_year, trade_data_year,
                 afg_export_value_usd, global_market_size_usd,
+                afg_last_export_year, afg_last_export_value_usd,
                 market_share_pct, afg_supplier_rank,
                 yoy_growth_pct, cagr_pct, absolute_growth_usd, growth_pct,
                 first_year, last_year, price_competitiveness,
@@ -265,6 +272,7 @@ def seeded_db():
             SELECT
                 p.id, '144', 2024, NULL,
                 NULL, 90000000,
+                NULL, NULL,
                 NULL, NULL,
                 NULL, NULL, NULL, NULL,
                 2021, 2024, 'Average',
@@ -357,6 +365,19 @@ class TestMarketDetail:
         assert "market_code" in body
         assert "competitors" in body
         assert "trade_history" in body
+
+    def test_market_indicator_includes_afg_last_export_fields(self, client, seeded_db):
+        """
+        Regression test for the same class of bug the trade_data_year round-trip
+        test in etl/tests/test_load.py guards against: a column added to
+        models.py/schemas.py but missed in a service layer's SELECT/mapping
+        would silently come back as null even when the DB has real data.
+        """
+        r = client.get("/api/products/091020/markets/699")
+        assert r.status_code == 200
+        indicator = r.json()["indicator"]
+        assert indicator["afg_last_export_year"] == 2024
+        assert indicator["afg_last_export_value_usd"] == pytest.approx(1_500_000)
 
 
 class TestIndicatorDefinitions:

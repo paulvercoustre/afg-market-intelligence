@@ -125,11 +125,16 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                         ? market.trade_data_year
                         : undefined
                     }
+                    lastKnown={
+                      market.afg_export_value_usd == null && market.afg_last_export_year != null
+                        ? { year: market.afg_last_export_year, value: market.afg_last_export_value_usd }
+                        : undefined
+                    }
                   />
                   <MetricRow label="CAGR" value={formatPct(market.cagr_pct)} />
                   <MetricRow
                     label="Market share"
-                    value={formatPct(market.market_share_pct, 2)}
+                    value={formatPct(market.market_share_pct, 2, false)}
                   />
                 </div>
 
@@ -155,10 +160,12 @@ function MetricRow({
   label,
   value,
   staleYear,
+  lastKnown,
 }: {
   label: string
   value: string
   staleYear?: number
+  lastKnown?: { year: number; value: number | null }
 }) {
   return (
     <div className="flex justify-between gap-2">
@@ -171,6 +178,14 @@ function MetricRow({
             title={`This market's latest reported data is from ${staleYear} -- Comtrade hasn't published a newer year yet.`}
           >
             ({staleYear})
+          </span>
+        )}
+        {lastKnown != null && (
+          <span
+            className="text-gray-400 font-normal ml-1 text-[10px]"
+            title={`Afghanistan has no recorded exports here this year. Last known: ${formatUSD(lastKnown.value)} in ${lastKnown.year}.`}
+          >
+            (last {lastKnown.year}: {formatUSD(lastKnown.value)})
           </span>
         )}
       </span>

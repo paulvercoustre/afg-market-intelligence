@@ -66,6 +66,8 @@ class MarketIndicator(BaseModel):
     market_share_pct: float | None
     afg_supplier_rank: int | None
     trade_data_year: int | None = None
+    afg_last_export_year: int | None = None
+    afg_last_export_value_usd: float | None = None
     growth: GrowthMetrics
     price: PriceMetrics
 
@@ -168,6 +170,8 @@ class MarketOpportunity(BaseModel):
     language_similarity: float | None
     tariff_rate_pct: float | None = None
     trade_data_year: int | None = None
+    afg_last_export_year: int | None = None
+    afg_last_export_value_usd: float | None = None
     score_breakdown: ScoreBreakdown
     context: MarketContextData
 

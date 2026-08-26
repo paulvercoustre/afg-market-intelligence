@@ -9,9 +9,13 @@ export function formatUSD(value: number | null | undefined, compact = true): str
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
 }
 
-export function formatPct(value: number | null | undefined, decimals = 1): string {
+export function formatPct(
+  value: number | null | undefined,
+  decimals = 1,
+  showSign = true,
+): string {
   if (value == null) return '—'
-  const sign = value > 0 ? '+' : ''
+  const sign = showSign && value > 0 ? '+' : ''
   return `${sign}${value.toFixed(decimals)}%`
 }
 

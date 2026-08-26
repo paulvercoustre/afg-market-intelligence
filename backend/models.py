@@ -92,6 +92,8 @@ class Indicator(Base):
     trade_data_year = Column(Integer)  # year the trade fields below actually came from -- can be earlier than computed_for_year if this market's Comtrade submission for that year hasn't landed yet
     global_market_size_usd = Column(Numeric(20, 2))
     afg_export_value_usd = Column(Numeric(20, 2))
+    afg_last_export_year = Column(Integer)  # most recent year (bounded, see etl/transform.py) Afghanistan had any recorded export to this market -- can differ from trade_data_year when the current year's afg value is a genuine zero
+    afg_last_export_value_usd = Column(Numeric(20, 2))
     yoy_growth_pct = Column(Numeric(10, 4))
     cagr_pct = Column(Numeric(10, 4))
     absolute_growth_usd = Column(Numeric(20, 2))

@@ -35,6 +35,17 @@ export default async function MarketProfilePage(
     profile.computed_for_year != null &&
     tradeDataYear !== profile.computed_for_year
 
+  // Afghanistan can genuinely have zero recorded exports here for the
+  // current trade_data_year (a real signal, not a data gap) -- when that
+  // happens, surface the last year it did have any, purely for context,
+  // rather than showing a bare dash with no history at all.
+  const afgLastExportYear = profile.trade?.afg_last_export_year ?? null
+  const afgLastExportValue = profile.trade?.afg_last_export_value_usd ?? null
+  const showAfgLastExport =
+    profile.trade != null &&
+    profile.trade.afg_export_value_usd == null &&
+    afgLastExportYear != null
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Breadcrumb */}
@@ -99,7 +110,13 @@ export default async function MarketProfilePage(
                 <StatCard
                   label="Afghan exports"
                   value={formatUSD(profile.trade.afg_export_value_usd)}
-                  sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
+                  sub={
+                    isStaleTradeData
+                      ? `(${tradeDataYear} data)`
+                      : showAfgLastExport
+                        ? `last exported ${afgLastExportYear}: ${formatUSD(afgLastExportValue)}`
+                        : undefined
+                  }
                 />
                 <StatCard
                   label="Global market size"
@@ -108,7 +125,7 @@ export default async function MarketProfilePage(
                 />
                 <StatCard
                   label="Afghan market share"
-                  value={formatPct(profile.trade.market_share_pct, 2)}
+                  value={formatPct(profile.trade.market_share_pct, 2, false)}
                   sub={isStaleTradeData ? `(${tradeDataYear} data)` : undefined}
                 />
                 <StatCard
@@ -224,6 +241,8 @@ export default async function MarketProfilePage(
                     ? `${profile.context.lpi_score.toFixed(2)} / 5`
                     : '—'
                 }
+                dataYear={profile.context.lpi_score_year}
+                currentYear={profile.computed_for_year}
               />
               <ContextRow
                 label="Regulatory quality"
@@ -232,6 +251,8 @@ export default async function MarketProfilePage(
                     ? profile.context.regulatory_quality.toFixed(2)
                     : '—'
                 }
+                dataYear={profile.context.regulatory_quality_year}
+                currentYear={profile.computed_for_year}
               />
               <ContextRow
                 label="Political stability"
@@ -240,12 +261,16 @@ export default async function MarketProfilePage(
                     ? profile.context.political_stability.toFixed(2)
                     : '—'
                 }
+                dataYear={profile.context.political_stability_year}
+                currentYear={profile.computed_for_year}
               />
               {profile.context.tariff_rate_pct != null && (
                 <ContextRow
                   label={`Tariff rate (${profile.context.tariff_indicator ?? 'MFN'})`}
                   value={`${profile.context.tariff_rate_pct.toFixed(1)}%`}
                   highlight={profile.context.tariff_rate_pct >= 15}
+                  dataYear={profile.context.tariff_year}
+                  currentYear={profile.computed_for_year}
                 />
               )}
             </div>
@@ -300,16 +325,29 @@ function ContextRow({
   label,
   value,
   highlight,
+  dataYear,
+  currentYear,
 }: {
   label: string
   value: string
   highlight?: boolean
+  dataYear?: number | null
+  currentYear?: number | null
 }) {
+  const isStale = dataYear != null && currentYear != null && dataYear !== currentYear
   return (
     <div className="flex justify-between gap-2 py-1 border-b border-gray-50 last:border-0">
       <span className="text-gray-500">{label}</span>
       <span className={`font-medium tabular-nums ${highlight ? 'text-red-600' : 'text-gray-800'}`}>
         {value}
+        {isStale && (
+          <span
+            className="text-amber-500 font-normal ml-1"
+            title={`This value is from ${dataYear}, the most recent year reported -- not ${currentYear}.`}
+          >
+            ({dataYear})
+          </span>
+        )}
       </span>
     </div>
   )

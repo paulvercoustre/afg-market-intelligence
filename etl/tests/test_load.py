@@ -225,6 +225,10 @@ class TestBulkUpsertIndicators:
         # not just the tariff fields this test targets.
         assert row["has_fta"] is False
         assert row["score_distance"] is not None
+        # afg_last_export_year/value class of column: same regression class as
+        # tariff_year above -- must round-trip through the INSERT column list.
+        assert row["afg_last_export_year"] == max(YEARS)
+        assert float(row["afg_last_export_value_usd"]) == pytest.approx(float(row["afg_export_value_usd"]))
 
     def test_empty_rows_is_a_noop(self, pg_engine):
         assert load.bulk_upsert_indicators(pg_engine, []) == 0

@@ -47,9 +47,36 @@ class TestDimensionScores:
         assert _score_price(None) == 50.0
 
     def test_foothold_log_scale(self):
-        assert _score_foothold(None) == 25.0
-        assert _score_foothold(0) == 25.0
+        assert _score_foothold(None) == 0.0
+        assert _score_foothold(0) == 0.0
         assert _score_foothold(1_000_000) == pytest.approx(84.0, rel=0.01)
+
+    def test_foothold_current_year_value_wins_over_last_export(self):
+        # Both present -- the active current-year figure is used, not a
+        # blend with the historical one.
+        assert _score_foothold(1_000_000, 500_000) == pytest.approx(84.0, rel=0.01)
+
+    def test_foothold_falls_back_to_last_export_when_current_year_is_none(self):
+        # Genuine current-year absence, but Afghanistan exported $1M as
+        # recently as a bounded prior year -- discounted (0.7x) vs. an
+        # active current-year presence, but still above the "no Afghan
+        # trade at all" baseline (0.0).
+        score = _score_foothold(None, 1_000_000)
+        assert score == pytest.approx(84.0 * 0.7, rel=0.01)
+        assert 0.0 < score < 84.0
+
+    def test_foothold_falls_back_to_last_export_when_current_year_is_zero(self):
+        assert _score_foothold(0, 1_000_000) == pytest.approx(84.0 * 0.7, rel=0.01)
+
+    def test_foothold_trivial_last_export_scores_barely_above_zero(self):
+        # A $1 historical value is technically "some" history -- it scores
+        # a hair above 0, not a meaningfully higher floor.
+        score = _score_foothold(None, 1)
+        assert 0.0 < score < 5.0
+
+    def test_foothold_no_current_and_no_last_export_is_zero(self):
+        assert _score_foothold(None, None) == 0.0
+        assert _score_foothold(0, 0) == 0.0
 
     def test_distance_boundaries(self):
         assert _score_distance(None) == 50.0
@@ -181,6 +208,22 @@ class TestEnrichIndicatorsWithScores:
         # double-rounding, e.g. a sub-score of x.xx5 rounding a different way
         # in each path.
         assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_foothold_score_uses_last_export_when_current_year_is_none(self, sample_indicator_row):
+        # Market has no afg_export_value_usd for the current trade_data_year
+        # (a genuine zero -- see _resolve_afg_last_export()'s docstring) but
+        # does have a bounded-year afg_last_export_value_usd on record. The
+        # composite's afg_foothold dimension must use that discounted
+        # fallback, not the flat 0.0 "no history at all" baseline.
+        row = sample_indicator_row.copy()
+        row["afg_export_value_usd"] = None
+        row["afg_last_export_value_usd"] = 1_000_000.0
+        rows = enrich_indicators_with_scores(
+            [row], market_context={}, all_market_sizes={"699": 10_000_000},
+        )
+        enriched = rows[0]
+        assert enriched["score_afg_foothold"] == pytest.approx(84.0 * 0.7, rel=0.01)
+        assert 0.0 < enriched["score_afg_foothold"] < 84.0
 
     def test_neutral_defaults_without_wb_and_tariff(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(

@@ -144,6 +144,12 @@ def compute_indicators(
         # Afghanistan's export value to this market (trade_data_year)
         afg_value_latest = _sum_year(afg_to_market, "trade_value_usd", trade_data_year)
 
+        # Afghanistan's own most recent export year to this market, independent
+        # of trade_data_year -- see _resolve_afg_last_export() docstring.
+        afg_last_export_year, afg_last_export_value = _resolve_afg_last_export(
+            afg_to_market, latest_year
+        )
+
         # Growth metrics
         growth = _growth_metrics(afg_to_market, years)
 
@@ -172,6 +178,8 @@ def compute_indicators(
             "trade_data_year": trade_data_year,
             "global_market_size_usd": _float_or_none(global_market_size),
             "afg_export_value_usd": _float_or_none(afg_value_latest),
+            "afg_last_export_year": afg_last_export_year,
+            "afg_last_export_value_usd": _float_or_none(afg_last_export_value),
             "yoy_growth_pct": _float_or_none(growth["yoy"]),
             "cagr_pct": _float_or_none(growth["cagr"]),
             "absolute_growth_usd": _float_or_none(growth["absolute"]),
@@ -218,6 +226,47 @@ def _resolve_trade_year(
         years_with_data |= set(pd.to_numeric(afg_to_market["year"], errors="coerce").dropna().astype(int))
     eligible = [y for y in years_with_data if y <= up_to_year]
     return max(eligible) if eligible else None
+
+
+# A country genuinely halting Afghan imports is real signal worth showing as a
+# zero for the current year (see _resolve_trade_year above) -- but reusing an
+# arbitrarily old year to paper over that would misrepresent Afghanistan's
+# *current* presence. This floor bounds how far back "last known export year"
+# is allowed to look, so a market with, say, a single small shipment in 2019
+# and nothing since doesn't get displayed as if it were still active.
+AFG_LAST_EXPORT_FLOOR_YEAR = 2022
+
+
+def _resolve_afg_last_export(
+    afg_to_market: pd.DataFrame, up_to_year: int, floor_year: int = AFG_LAST_EXPORT_FLOOR_YEAR
+) -> tuple[int | None, float | None]:
+    """
+    The most recent year (floor_year <= year <= up_to_year) that Afghanistan
+    has any recorded export value to this market, and the value for that year.
+
+    Independent of trade_data_year: trade_data_year anchors global_market_size_usd
+    and afg_export_value_usd to the market's own current reporting year so
+    market_share_pct/afg_supplier_rank stay same-year, apples-to-apples
+    comparisons -- including a genuine zero when Afghanistan simply isn't in
+    that year's partner breakdown. This instead answers "when did Afghanistan
+    last actually show up here at all," purely for display, so a genuine
+    current-year zero isn't shown to the user as if no data existed at all.
+    """
+    if afg_to_market.empty:
+        return None, None
+    yearly = afg_to_market.groupby("year")["trade_value_usd"].sum().reset_index()
+    yearly["year"] = pd.to_numeric(yearly["year"], errors="coerce")
+    yearly = yearly.dropna(subset=["year"])
+    yearly["year"] = yearly["year"].astype(int)
+    eligible = yearly[
+        (yearly["year"] >= floor_year)
+        & (yearly["year"] <= up_to_year)
+        & (yearly["trade_value_usd"] > 0)
+    ]
+    if eligible.empty:
+        return None, None
+    row = eligible.sort_values("year").iloc[-1]
+    return int(row["year"]), float(row["trade_value_usd"])
 
 
 def _sum_year(df: pd.DataFrame, col: str, year: int) -> float | None:
@@ -432,7 +481,9 @@ def enrich_indicators_with_scores(
         s_growth = _score_growth(row.get("cagr_pct"))
         s_quality = _score_market_quality(ctx)
         s_price = _score_price(row.get("price_competitiveness"))
-        s_foothold = _score_foothold(row.get("afg_export_value_usd"))
+        s_foothold = _score_foothold(
+            row.get("afg_export_value_usd"), row.get("afg_last_export_value_usd")
+        )
         s_distance = _score_distance(dist_km)
         s_language = lang * 100
         s_fta = 100.0 if has_fta else 0.0
@@ -526,12 +577,26 @@ def _score_price(competitiveness: str | None) -> float:
     return mapping.get(competitiveness or "", 50.0)
 
 
-def _score_foothold(afg_value: float | None) -> float:
-    """Existing Afghan presence signals market acceptance."""
-    if afg_value is None or afg_value <= 0:
-        return 25.0  # untapped — still plausible, but penalised
-    # Log-scale: $10k → ~25, $1M → ~60, $10M → ~75, $100M → ~90
-    return min(100.0, math.log10(afg_value + 1) * 14)
+def _score_foothold(afg_value: float | None, afg_last_export_value: float | None = None) -> float:
+    """
+    Existing Afghan presence signals market acceptance.
+
+    afg_value is this year's figure -- the same one used everywhere else,
+    including a genuine current-year zero when Afghanistan isn't in this
+    year's partner breakdown (see _resolve_afg_last_export()'s docstring).
+    A genuine zero shouldn't score identically to a market with no Afghan
+    trade history at all, though: when afg_value is missing/zero but
+    Afghanistan has a recent bounded-year export on record
+    (afg_last_export_value, see AFG_LAST_EXPORT_FLOOR_YEAR), that's still
+    real evidence of market acceptance -- score it, just at a discount
+    (0.7x) versus an active current-year presence.
+    """
+    if afg_value is not None and afg_value > 0:
+        # Log-scale: $10k → ~25, $1M → ~60, $10M → ~75, $100M → ~90
+        return min(100.0, math.log10(afg_value + 1) * 14)
+    if afg_last_export_value is not None and afg_last_export_value > 0:
+        return min(90.0, math.log10(afg_last_export_value + 1) * 14 * 0.7)
+    return 0.0  # no Afghan trade on record at all, current or historical
 
 
 def _score_distance(dist_km: int | None) -> float:

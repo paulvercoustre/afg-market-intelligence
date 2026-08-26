@@ -390,6 +390,7 @@ When going through this with your colleague, a natural order:
 ## 6. Known Quirks & Recent Changes
 
 - **Mirror data only** — Afghan export values come from partner countries' import records, not direct Afghan reporting
+- **Genuine zero vs. reporting lag for Afghan exports** — `afg_export_value_usd` stays pinned to `trade_data_year` even when Afghanistan simply isn't in that year's partner breakdown (a real signal, not missing data — see `_resolve_afg_last_export()`'s docstring in `etl/transform.py`). Two extra columns, `afg_last_export_year`/`afg_last_export_value_usd` (migration 0007), separately surface the most recent year (bounded at `AFG_LAST_EXPORT_FLOOR_YEAR = 2022`) Afghanistan had any recorded export to that market, purely for display context — never folded into `market_share_pct`, `afg_supplier_rank`, or the opportunity score, since mixing years there would compare an old Afghan figure against a newer global market size
 - **Comtrade numeric codes** — markets use UN M49 codes (not ISO). `country_names.py` handles resolution
 - **WITS lag** — tariff data may be 2–3 years behind; the fetcher walks back through years automatically, and (as of migration 0004) the actual year used is stamped on each indicator row as `tariff_year` so staleness is visible in the data itself, not just inferred
 - **WITS 404s are normal** — a (reporter, partner, year) combination with no reported schedule (e.g. no preferential scheme for Afghanistan) returns 404; the pipeline treats that as "no data" and falls back, not as an error
