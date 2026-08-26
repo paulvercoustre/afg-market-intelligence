@@ -10,11 +10,10 @@ const SCORE_DIMENSIONS = [
   { key: 'market_growth', label: 'Market growth', weight: 0.18 },
   { key: 'market_quality', label: 'Market quality', weight: 0.13 },
   { key: 'price_competitiveness', label: 'Price', weight: 0.13 },
-  { key: 'tariff', label: 'Tariff', weight: 0.10 },
+  { key: 'tariff', label: 'Tariff', weight: 0.12 },
   { key: 'afg_foothold', label: 'Afghan foothold', weight: 0.10 },
   { key: 'distance', label: 'Proximity', weight: 0.10 },
   { key: 'language', label: 'Language', weight: 0.04 },
-  { key: 'fta_status', label: 'FTA access', weight: 0.02 },
 ] as const
 
 export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]'>) {
@@ -79,14 +78,18 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                       {market.market_name ?? market.market_code}
                     </p>
                     <div className="flex items-center gap-2 mt-0.5">
-                      {market.has_fta && (
-                        <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded">
-                          FTA
-                        </span>
-                      )}
                       {market.tariff_rate_pct != null && (
                         <span className="text-[10px] text-gray-400">
                           {market.tariff_rate_pct.toFixed(1)}% tariff
+                          {market.context.tariff_year != null &&
+                            market.context.tariff_year !== result.computed_for_year && (
+                              <span
+                                className="text-amber-500 ml-0.5"
+                                title={`Tariff rate is from ${market.context.tariff_year}, not ${result.computed_for_year} -- WITS lags behind trade data.`}
+                              >
+                                ({market.context.tariff_year})
+                              </span>
+                            )}
                         </span>
                       )}
                     </div>

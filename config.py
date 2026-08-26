@@ -26,12 +26,20 @@ OPPORTUNITY_SCORE_WEIGHTS = {
     "market_growth": 0.18,       # CAGR of global imports in this market
     "market_quality": 0.13,      # World Bank governance + LPI composite
     "price_competitiveness": 0.13,  # Afghan price vs market average
-    "tariff": 0.10,              # effective import tariff rate from WITS
+    "tariff": 0.12,              # effective import tariff rate from WITS
     "afg_foothold": 0.10,        # existing Afghan export presence
     "distance": 0.10,            # geographic proximity to Kabul
     "language": 0.04,            # language / cultural similarity
-    "fta_status": 0.02,          # preferential trade access (small bonus — mostly captured in tariff)
 }
+# fta_status (preferential trade access) is deliberately excluded from the
+# composite: WITS's AFG-specific (partner=004) tariff schedule returns
+# "NoRecordsFound" for every reporter checked (India, Pakistan, Iran,
+# Germany, Turkiye, Bangladesh), so has_fta is False and score_fta is 0 for
+# 100% of rows in practice -- a weight that can never move the score. Its
+# 0.02 share was folded into "tariff" above, which already prices in the
+# actual applied rate WITS does report (AHS or MFN). score_fta/has_fta are
+# still computed and stored (etl/transform.py, indicators table) in case
+# WITS coverage improves -- just not weighted into opportunity_score.
 
 # Tariff scoring: maps tariff rate % to a 0–100 score.
 # 0% → 100, 10% → 70, 20% → 40, 33%+ → 0  (linear: score = max(0, 100 - rate * 3))

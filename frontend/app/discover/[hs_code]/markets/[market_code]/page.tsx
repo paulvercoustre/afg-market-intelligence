@@ -11,11 +11,10 @@ const SCORE_DIMENSIONS = [
   { key: 'market_growth', label: 'Market growth', weight: 0.18 },
   { key: 'market_quality', label: 'Market quality', weight: 0.13 },
   { key: 'price_competitiveness', label: 'Price competitiveness', weight: 0.13 },
-  { key: 'tariff', label: 'Tariff rate', weight: 0.10 },
+  { key: 'tariff', label: 'Tariff rate', weight: 0.12 },
   { key: 'afg_foothold', label: 'Afghan foothold', weight: 0.10 },
   { key: 'distance', label: 'Geographic proximity', weight: 0.10 },
   { key: 'language', label: 'Language similarity', weight: 0.04 },
-  { key: 'fta_status', label: 'FTA / trade access', weight: 0.02 },
 ] as const
 
 export default async function MarketProfilePage(

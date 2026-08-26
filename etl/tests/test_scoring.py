@@ -200,7 +200,6 @@ class TestEnrichIndicatorsWithScores:
             + enriched["score_afg_foothold"] * weights["afg_foothold"]
             + enriched["score_distance"] * weights["distance"]
             + enriched["score_language"] * weights["language"]
-            + enriched["score_fta"] * weights["fta_status"]
         )
         # abs tolerance, not just rel: `expected` sums sub-scores that were each
         # already rounded to 2dp, while opportunity_score rounds the sum of the

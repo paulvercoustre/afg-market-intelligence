@@ -499,6 +499,10 @@ def enrich_indicators_with_scores(
         row["score_fta"] = round(s_fta, 2)
         row["score_tariff"] = round(s_tariff, 2)
 
+        # score_fta/has_fta are still computed and stored above for every row
+        # (in case WITS's AFG-specific tariff coverage improves), but not
+        # weighted into the composite -- see config.py's OPPORTUNITY_SCORE_WEIGHTS
+        # comment for why (WITS has_fta is currently False for 100% of rows).
         composite = (
             s_size * weights["market_size"]
             + s_growth * weights["market_growth"]
@@ -508,7 +512,6 @@ def enrich_indicators_with_scores(
             + s_foothold * weights["afg_foothold"]
             + s_distance * weights["distance"]
             + s_language * weights["language"]
-            + s_fta * weights["fta_status"]
         )
         row["opportunity_score"] = round(composite, 2)
 

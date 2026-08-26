@@ -255,15 +255,16 @@ Fetched via `fetch_tariff_rates()` in `etl/fetch.py`:
 
 Stored as columns on the `indicators` table: `tariff_rate_pct`, `tariff_indicator` (migration 0003), and `tariff_year` (migration 0004) — the actual year WITS reported the rate for, which is frequently earlier than the row's `computed_for_year` because of the lag above. Without `tariff_year` there was no way to tell, from the data alone, how stale a given market's tariff rate actually is.
 
-### Static lookups (no API)
+### Reference-data lookups
 
-Defined in `config.py`:
+Defined in `config.py`, built at import time from checked-in CSV extracts in `reference/` (not hand-typed):
 
-| Lookup | Purpose |
-|--------|---------|
-| `DISTANCE_FROM_KABUL_KM` | Straight-line km from Kabul to ~60 trading partners |
-| `LANGUAGE_SIMILARITY` | 0.0–1.0 score based on Dari/Pashto trade-communication overlap |
-| `FTA_STATUS` | Afghanistan's preferential access (SAPTA, ECO, EU/UK GSP+) |
+| Lookup | Purpose | Source |
+|--------|---------|--------|
+| `DISTANCE_FROM_KABUL_KM` | Great-circle capital-to-capital km | CEPII GeoDist; regenerate via `reference/build_distance_reference.py` |
+| `LANGUAGE_SIMILARITY` | 0.0–1.0 blend of linguistic proximity + common native language to Dari/Pashto | DICL dataset; regenerate via `reference/build_language_reference.py` |
+
+Preferential trade access (formerly a static `FTA_STATUS` dict) is no longer a lookup at all — `has_fta`/`score_fta` are now derived live in `etl/transform.py` from WITS's own AHS/MFN partner-segment indicator (`indicators.tariff_indicator == 'AHS'`), reusing the same WITS fetch that already powers the tariff dimension.
 
 ### Products tracked
 
@@ -308,7 +309,7 @@ For each (product, market) pair, the tool computes a composite **Opportunity Sco
 
 Higher = more opportunity. Markets are ranked by this score in the discovery view.
 
-### The 9 dimensions
+### The 8 dimensions
 
 Each dimension is normalised to 0–100, then combined using configurable weights from `config.py` → `OPPORTUNITY_SCORE_WEIGHTS`:
 
@@ -318,13 +319,14 @@ Each dimension is normalised to 0–100, then combined using configurable weight
 | **Market growth** | 18% | Comtrade | CAGR of global imports (trend) |
 | **Market quality** | 13% | World Bank | Composite of LPI, regulatory quality, political stability |
 | **Price competitiveness** | 13% | Comtrade | Afghan unit price vs market average |
-| **Tariff rate** | 10% | WITS | Import tariff Afghanistan faces (lower = better) |
+| **Tariff rate** | 12% | WITS | Import tariff Afghanistan faces (lower = better) |
 | **Afghan foothold** | 10% | Comtrade | Existing Afghan export presence in the market |
 | **Distance** | 10% | Static | Geographic proximity to Kabul |
 | **Language similarity** | 4% | Static | Dari/Pashto communication overlap |
-| **FTA status** | 2% | Static | Preferential trade access (small bonus) |
 
 Weights must sum to 1.0. Change them in `config.py` and re-run the ETL.
+
+**FTA access (`score_fta`) is deliberately not one of the weighted dimensions.** It's still computed live per row (see the AHS/MFN note below) and stored in `indicators.has_fta`/`score_fta`, but WITS's AFG-specific (`partner=004`) tariff schedule returns "NoRecordsFound" for essentially every reporter, so `has_fta` is `False` and `score_fta` is 0 for ~100% of rows in practice — weighting it in would just be dead weight. Its former 2% share was folded into Tariff (10% → 12%) above.
 
 ### How each dimension is scored (0–100)
 
@@ -340,7 +342,6 @@ Implemented in `etl/transform.py`:
 | **Afghan foothold** | Log-scale of export value: $0 → 25, $1M → ~60, $10M → ~75, $100M → ~90 |
 | **Distance** | Linear: 0 km → 100, 15,000 km → 0. Defaults to 50 if unknown |
 | **Language** | `LANGUAGE_SIMILARITY × 100` (0.0–1.0 lookup) |
-| **FTA** | 100 if partial/full FTA, 0 otherwise |
 
 ### Composite calculation
 

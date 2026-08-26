@@ -162,13 +162,14 @@ with UN numeric country codes):
 
 | Lookup | Keyed by | Purpose | Provenance |
 |---|---|---|---|
-| `DISTANCE_FROM_KABUL_KM` | Comtrade numeric country code | Proximity scoring | Approximate straight-line km; manual compilation |
-| `LANGUAGE_SIMILARITY` | Comtrade numeric country code | Language/cultural scoring (0.0–1.0) | Expert judgment based on Dari/Pashto mutual intelligibility |
-| `FTA_STATUS` | Comtrade numeric country code | Preferential access flag | Afghanistan memberships: SAPTA, ECO, EU/UK GSP+ |
+| `DISTANCE_FROM_KABUL_KM` | Comtrade numeric country code | Proximity scoring | Great-circle capital-to-capital km from CEPII GeoDist (Mayer & Zignago, 2011), joined via `NUMERIC_TO_ISO3`; regenerate with `reference/build_distance_reference.py`. Palestine and Montenegro have no CEPII entry and fall back to a neutral score. |
+| `LANGUAGE_SIMILARITY` | Comtrade numeric country code | Language/cultural scoring (0.0–1.0) | Blend of DICL's `lp` (linguistic proximity, weight 0.8) and `cnl` (common native language, weight 0.2) — Gurevich, Herman, Toubal & Yotov (2025), https://doi.org/10.7910/DVN/8WGJTL; regenerate with `reference/build_language_reference.py` |
 | `PRODUCTS` | Product name | 34 pilot products with HS codes | UNDP/ACCI product selection |
 | `OPPORTUNITY_SCORE_WEIGHTS` | Dimension name | Scoring model weights | Scoping note methodology |
 
-**Limitations:** Static lookups do not auto-update when trade agreements change. Manual review required when FTA status changes.
+**Limitations:** Static lookups do not auto-update between data-source refreshes — rerun the relevant `reference/build_*.py` script and the ETL to pick up new CEPII/DICL releases.
+
+**Preferential trade access (`has_fta` / `score_fta`)** is no longer a static lookup — it's derived live in `etl/transform.py` (`enrich_indicators_with_scores`) from WITS's own AHS/MFN partner-segment indicator (`indicators.tariff_indicator == 'AHS'`), reusing the same WITS fetch that already powers the tariff dimension rather than a hand-maintained "which FTAs is Afghanistan in" dict. `AHS` means WITS has an Afghanistan-specific applied-tariff record on file for that reporter; it doesn't guarantee that specific rate is lower than the MFN rate (MFN is only fetched as a fallback when AHS is unavailable, not always both), but the actual rate — whichever indicator it came from — is already fully captured in `score_tariff` separately.
 
 ---
 
@@ -263,13 +264,14 @@ Each of nine dimensions is normalised to 0–100, then combined as a weighted su
 | Market growth | 18% | CAGR mapped to 0–100 (negative CAGR → 0, ≥20% → 100) |
 | Market quality | 13% | Composite of LPI + regulatory quality + political stability |
 | Price competitiveness | 13% | Label-based: Highly Competitive=100, Competitive=75, Average=50, Above Market=25 |
-| Tariff | 10% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
+| Tariff | 12% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
 | Afghan foothold | 10% | Log-scaled existing export value |
 | Distance | 10% | Inverse distance from Kabul (closer = higher) |
 | Language | 4% | `similarity × 100` (0.0–1.0 lookup) |
-| FTA access | 2% | 100 if FTA exists, 0 otherwise |
 
 Weights must sum to 1.0 (enforced in `config.py`).
+
+**FTA access (`score_fta`) is computed but excluded from the composite.** WITS's AFG-specific (`partner=004`) tariff schedule returns "NoRecordsFound" for every reporter checked, so `has_fta` is `False` and `score_fta` is 0 for essentially every row — a weight that could never move the score. Its former 2% share was folded into Tariff (10% → 12%) above. `has_fta`/`score_fta` are still computed per row and stored in `indicators` in case WITS's coverage improves, and remain available via the API, but are no longer part of `opportunity_score` and are not shown in the frontend's score breakdown.
 
 **Missing data handling:** If a dimension cannot be computed (e.g. no WITS tariff), its sub-score defaults to 50 (neutral) and the composite score is still calculated. This avoids excluding markets with data gaps while not over-penalising them. Implemented in `etl/transform.py` (`_score_tariff`, `_score_market_quality`, `_score_distance`, `_score_growth`, `_score_price`).
 
@@ -433,7 +435,7 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | `score_afg_foothold` | NUMERIC(5,2) | Afghan foothold dimension score | Computed |
 | `score_distance` | NUMERIC(5,2) | Proximity dimension score | Computed |
 | `score_language` | NUMERIC(5,2) | Language dimension score | Computed |
-| `score_fta` | NUMERIC(5,2) | FTA access dimension score | Computed |
+| `score_fta` | NUMERIC(5,2) | FTA access dimension score — stored but not weighted into `opportunity_score` (§4.6) | Computed |
 | `score_tariff` | NUMERIC(5,2) | Tariff dimension score | Computed |
 | `computed_at` | TIMESTAMPTZ | Timestamp of computation | System |
 
