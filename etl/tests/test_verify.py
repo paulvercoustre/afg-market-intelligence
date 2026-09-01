@@ -140,6 +140,32 @@ class TestCheckMarketContextCompleteness:
         assert result["missing_gdp"] == 0
 
 
+class TestCheckMarketSizeFloorCalibration:
+    def test_empty_table_returns_zero_total(self, pg_engine):
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 0
+
+    def test_counts_real_values_clipped_at_or_below_floor(self, pg_engine, product_id):
+        # config.MARKET_SIZE_LOG_FLOOR_USD is 500 -- 500 and 94 are both real
+        # values at or below it (clipped to 0), 10_000_000 is comfortably above.
+        _insert_indicator(pg_engine, product_id, market_code="699",
+                           global_market_size_usd=500, score_market_size=0.0)
+        _insert_indicator(pg_engine, product_id, market_code="586",
+                           global_market_size_usd=94, score_market_size=0.0)
+        _insert_indicator(pg_engine, product_id, market_code="364",
+                           global_market_size_usd=10_000_000, score_market_size=95.0)
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 3
+        assert result["clipped_real"] == 2
+
+    def test_does_not_count_values_above_the_floor(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, market_code="699",
+                           global_market_size_usd=10_000_000, score_market_size=95.0)
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 1
+        assert result["clipped_real"] == 0
+
+
 class TestCheckMarketShareConsistency:
     def test_clean_when_market_share_matches_recomputed_value(self, pg_engine, product_id):
         # 200,000 / 10,000,000 * 100 = 2.0
@@ -179,6 +205,32 @@ class TestCheckScoreBounds:
         results = verify.check_score_bounds(pg_engine)
         assert len(results) == 1
         assert float(results[0]["opportunity_score"]) == -10.0
+
+    def test_detects_political_stability_on_old_estimate_scale(self, pg_engine, product_id):
+        # Regression test: political_stability is fetched on the WGI "score"
+        # scale (0-100, GOV_WGI_PV.SC) -- a stale row still holding a value
+        # from the old -2.5..2.5 "estimate" scale (GOV_WGI_PV.EST) must be
+        # caught here, the same way an out-of-range score is.
+        _insert_indicator(pg_engine, product_id, political_stability=-0.6)
+        results = verify.check_score_bounds(pg_engine)
+        assert len(results) == 1
+        assert float(results[0]["political_stability"]) == -0.6
+
+    def test_clean_when_political_stability_in_0_100_range(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, political_stability=25.03)
+        assert verify.check_score_bounds(pg_engine) == []
+
+    def test_detects_regulatory_quality_on_old_estimate_scale(self, pg_engine, product_id):
+        # Same regression as political_stability above, but for
+        # regulatory_quality (GOV_WGI_RQ.SC vs the old GOV_WGI_RQ.EST).
+        _insert_indicator(pg_engine, product_id, regulatory_quality=-0.1)
+        results = verify.check_score_bounds(pg_engine)
+        assert len(results) == 1
+        assert float(results[0]["regulatory_quality"]) == -0.1
+
+    def test_clean_when_regulatory_quality_in_0_100_range(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, regulatory_quality=45.5)
+        assert verify.check_score_bounds(pg_engine) == []
 
 
 class TestCheckProductCoverage:

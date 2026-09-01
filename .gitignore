@@ -71,3 +71,7 @@ docs/OECD Handbook on Constructing Composite Indicators.pdf
 # Local working file, not meant for the repo.
 docs/INDICATOR_INVENTORY.xlsx
 
+# Local exploratory data-viz artifacts (calibration/analysis scratch work),
+# not part of the application.
+scratch/
+

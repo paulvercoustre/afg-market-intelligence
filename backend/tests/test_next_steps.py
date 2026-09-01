@@ -7,7 +7,7 @@ def _base_row(**overrides) -> dict:
     row = {
         "has_fta": False,
         "distance_km": 5000,
-        "price_competitiveness": "Average",
+        "price_competitiveness": "Near Market",
         "tariff_rate_pct": None,
         "tariff_indicator": None,
     }
@@ -62,7 +62,7 @@ class TestBuildNextSteps:
         assert "Explore overland trade routes" not in titles
 
     def test_competitive_pricing_adds_outreach_step(self):
-        steps = _build_next_steps(_base_row(price_competitiveness="Highly Competitive"), "356")
+        steps = _build_next_steps(_base_row(price_competitiveness="Substantially Below Market"), "356")
         titles = [s["title"] for s in steps]
         assert "Lead with price in buyer outreach" in titles
 
@@ -72,6 +72,6 @@ class TestBuildNextSteps:
         assert "Lead with price in buyer outreach" not in titles
 
     def test_competitive_label_also_triggers_outreach(self):
-        steps = _build_next_steps(_base_row(price_competitiveness="Competitive"), "356")
+        steps = _build_next_steps(_base_row(price_competitiveness="Below Market"), "356")
         titles = [s["title"] for s in steps]
         assert "Lead with price in buyer outreach" in titles

@@ -15,9 +15,11 @@ import pandas as pd
 
 from backend.country_names import resolve_country_name
 from config import (
+    CAGR_SCORE_BAND_PCT,
     DISTANCE_FROM_KABUL_KM,
     LANGUAGE_SIMILARITY,
     LANGUAGE_SIMILARITY_DEFAULT,
+    MARKET_SIZE_LOG_FLOOR_USD,
     MAX_GREAT_CIRCLE_DISTANCE_KM,
     NATIVE_UNIT_PRICE_BASES,
     OPPORTUNITY_SCORE_WEIGHTS,
@@ -295,11 +297,62 @@ def _sum_year(df: pd.DataFrame, col: str, year: int) -> float | None:
 # storing a nonsensical figure.
 _MAX_PCT_MAGNITUDE = 999_999.0
 
+# A CAGR beyond this is treated as a near-zero-base artifact rather than a
+# real trend -- see _find_sensical_cagr_window(). Chosen deliberately loose:
+# 500%/year compounded is already extreme (a 2-year span at the limit is a
+# 36x increase, a 4-year span is 1296x), so this only catches the most
+# extreme cases, minimising the risk of trimming a genuinely fast-growing
+# small market. It's also well above where it would matter to the score
+# anyway -- _score_growth saturates at +-20%/year, so a real 25% CAGR and a
+# fake 100,000% CAGR score identically (100). Checked against live data
+# (2026-08-28): flags 30/691 (4.3%) of currently-computed cagr_pct values
+# for the fallback below, e.g. Dried Apricots/France, whose naive 2022-2025
+# CAGR of +1079% is an artifact of a $6.35 opening year -- dropping that
+# year reveals the real trend is a -62% decline, not growth at all.
+_MAX_SENSICAL_CAGR_PCT = 500.0
+
 
 def _safe_pct(value: float | None) -> float | None:
     if value is None or math.isnan(value) or math.isinf(value):
         return None
     return value if abs(value) <= _MAX_PCT_MAGNITUDE else None
+
+
+def _find_sensical_cagr_window(
+    year_list: list[int], val_list: list[float], limit: float
+) -> tuple[float | None, int | None, int | None, float | None, float | None]:
+    """
+    Find the (first_year, last_year) pair whose CAGR is <= limit in
+    magnitude, preferring the widest possible span and, among spans of
+    equal width, preferring to trim the earliest year before the latest.
+
+    Exists because a single unrepresentative endpoint -- e.g. one year with
+    a near-zero trade value from a single tiny/one-off shipment -- can blow
+    up the naive first-year-to-last-year CAGR into a meaningless number
+    (see _MAX_SENSICAL_CAGR_PCT), even though the years around it show a
+    perfectly normal trend. Rather than discarding the CAGR entirely
+    whenever this happens, retry with that endpoint dropped before giving
+    up -- exactly like _score_tariff/_score_growth etc. fall back to a
+    neutral default only when there's truly nothing usable, not the first
+    time the naive calculation looks wrong.
+
+    Returns (cagr, first_year, last_year, first_val, last_val), or a tuple
+    of Nones if no window (down to the minimum 2-year span) qualifies.
+    """
+    n = len(year_list)
+    for span in range(n - 1, 0, -1):
+        max_start = n - 1 - span
+        for start_idx in range(max_start, -1, -1):  # trim start before end
+            end_idx = start_idx + span
+            first_year, last_year = year_list[start_idx], year_list[end_idx]
+            first_val, last_val = val_list[start_idx], val_list[end_idx]
+            year_gap = last_year - first_year
+            if year_gap <= 0 or first_val <= 0:
+                continue
+            cagr = _safe_pct(((last_val / first_val) ** (1 / year_gap) - 1) * 100)
+            if cagr is not None and abs(cagr) <= limit:
+                return cagr, first_year, last_year, first_val, last_val
+    return None, None, None, None, None
 
 
 def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
@@ -315,28 +368,48 @@ def _growth_metrics(afg_df: pd.DataFrame, years: list[int]) -> dict:
     if len(yearly) < 2:
         return empty
 
-    first_year = int(yearly["year"].iloc[0])
-    last_year = int(yearly["year"].iloc[-1])
-    first_val = float(yearly["trade_value_usd"].iloc[0])
-    last_val = float(yearly["trade_value_usd"].iloc[-1])
+    year_list = [int(y) for y in yearly["year"]]
+    val_list = [float(v) for v in yearly["trade_value_usd"]]
 
+    # yoy always compares the two most recent chronological years -- unlike
+    # cagr, there's no meaningful "try a different pair" fallback for a
+    # metric that's definitionally about consecutive years, so this stays
+    # independent of the window search below.
     yoy = None
-    if len(yearly) >= 2:
-        prev_val = float(yearly["trade_value_usd"].iloc[-2])
-        if prev_val > 0:
-            yoy = (last_val - prev_val) / prev_val * 100
+    prev_val, latest_val = val_list[-2], val_list[-1]
+    if prev_val > 0:
+        yoy = (latest_val - prev_val) / prev_val * 100
 
-    n = last_year - first_year
-    cagr = None
-    if n > 0 and first_val > 0:
-        cagr = ((last_val / first_val) ** (1 / n) - 1) * 100
+    # absolute always describes the full raw data span, unconditionally --
+    # a plain subtraction has no near-zero-base blowup risk (unlike cagr's
+    # and pct's division below), so an opening value of exactly $0 still
+    # gives a perfectly meaningful "$0 -> $1,000, +$1,000" rather than
+    # something to discard, and it answers a genuinely different question
+    # ("total dollar change across the whole observed history") than the
+    # windowed metrics below.
+    raw_first_val, raw_last_val = val_list[0], val_list[-1]
+    absolute = raw_last_val - raw_first_val
 
-    absolute = last_val - first_val
-    pct = (absolute / first_val * 100) if first_val > 0 else None
+    # first_year/last_year is specifically cagr_pct's own displayed span
+    # (the frontend shows it as CAGR's sub-label, "CAGR: 3.6% / 2021-2025").
+    # pct shares this same window rather than the raw span above -- unlike
+    # absolute, pct divides by first_val exactly like cagr does, so it has
+    # the identical near-zero-base blowup vulnerability (a $6.35 opening
+    # year made a real stored growth_pct read 164,046% while the already-
+    # fixed cagr_pct on the same row correctly read -62%) and needs the
+    # same fix, not just the same window for cosmetic consistency.
+    cagr, first_year, last_year, resolved_first_val, resolved_last_val = (
+        _find_sensical_cagr_window(year_list, val_list, _MAX_SENSICAL_CAGR_PCT)
+    )
+    pct = (
+        _safe_pct((resolved_last_val - resolved_first_val) / resolved_first_val * 100)
+        if resolved_first_val is not None
+        else None
+    )
 
     return {
-        "yoy": _safe_pct(yoy), "cagr": _safe_pct(cagr), "absolute": absolute,
-        "pct": _safe_pct(pct), "first_year": first_year, "last_year": last_year,
+        "yoy": _safe_pct(yoy), "cagr": cagr, "absolute": absolute,
+        "pct": pct, "first_year": first_year, "last_year": last_year,
     }
 
 
@@ -481,12 +554,12 @@ def _price_competitiveness(
     label = None
     if pct_diff is not None:
         thresholds = PRICE_COMPETITIVENESS
-        if pct_diff < thresholds["highly_competitive"]:
-            label = "Highly Competitive"
-        elif pct_diff < thresholds["competitive"]:
-            label = "Competitive"
-        elif pct_diff < thresholds["average"]:
-            label = "Average"
+        if pct_diff < thresholds["substantially_below_market"]:
+            label = "Substantially Below Market"
+        elif pct_diff < thresholds["below_market"]:
+            label = "Below Market"
+        elif pct_diff < thresholds["near_market"]:
+            label = "Near Market"
         else:
             label = "Above Market"
 
@@ -515,9 +588,16 @@ def enrich_indicators_with_scores(
     weights = OPPORTUNITY_SCORE_WEIGHTS
     tariffs = tariffs or {}
 
-    # Pre-compute log-normalised market size across all markets for this product
+    # Pre-compute log-normalised market size across all markets for this product.
+    # log_max is the denominator of _score_market_size's log min-max formula --
+    # see that function's docstring for why the floor is MARKET_SIZE_LOG_FLOOR_USD
+    # (an external reference) rather than the observed minimum.
     sizes = [v for v in all_market_sizes.values() if v and v > 0]
-    log_max = math.log1p(max(sizes)) if sizes else 1.0
+    max_size = max(sizes) if sizes else None
+    if max_size and max_size > MARKET_SIZE_LOG_FLOOR_USD:
+        log_max = math.log(max_size / MARKET_SIZE_LOG_FLOOR_USD)
+    else:
+        log_max = 1.0
 
     for row in indicator_rows:
         mc = row["market_code"]
@@ -542,7 +622,26 @@ def enrich_indicators_with_scores(
         row["political_stability_year"] = ctx.get("political_stability_year")
 
         # ── Tariff (WITS) ─────────────────────────────────────────────────────
+        # WITS deliberately reports MFN/Applied tariff rates for products a
+        # market doesn't actually trade at all -- its own site says so
+        # outright ("MFN and Applied Tariff are provided for both traded and
+        # non-traded goods"), and there's no "is this traded" flag anywhere
+        # in the tariff API response to filter those out. So this is derived
+        # from our own Comtrade data instead: a rate is only trusted if
+        # Afghanistan has real export evidence for this market -- this year
+        # or (falling back, same as the foothold score) historically. This
+        # is a raw-value check (> 0 on the actual float), not a rounded or
+        # displayed figure, so a genuine but tiny shipment still counts as
+        # traded. Applies the same way regardless of whether WITS reported
+        # the rate as AHS or MFN -- that only says which regime the rate
+        # came from, not whether Afghanistan actually trades here.
+        has_afg_trade_evidence = (
+            (row.get("afg_export_value_usd") or 0) > 0
+            or (row.get("afg_last_export_value_usd") or 0) > 0
+        )
         tariff_info = tariffs.get(mc) or {}
+        if not has_afg_trade_evidence:
+            tariff_info = {}
         tariff_rate = tariff_info.get("rate")
         row["tariff_rate_pct"] = tariff_rate
         row["tariff_indicator"] = tariff_info.get("indicator")
@@ -574,8 +673,8 @@ def enrich_indicators_with_scores(
         s_fta = 100.0 if has_fta else 0.0
         s_tariff = _score_tariff(tariff_rate)
 
-        row["score_market_size"] = round(s_size, 2)
-        row["score_market_growth"] = round(s_growth, 2)
+        row["score_market_size"] = round(s_size, 2) if s_size is not None else None
+        row["score_market_growth"] = round(s_growth, 2) if s_growth is not None else None
         row["score_market_quality"] = round(s_quality, 2)
         row["score_price_competitiveness"] = round(s_price, 2)
         row["score_afg_foothold"] = round(s_foothold, 2)
@@ -588,16 +687,27 @@ def enrich_indicators_with_scores(
         # (in case WITS's AFG-specific tariff coverage improves), but not
         # weighted into the composite -- see config.py's OPPORTUNITY_SCORE_WEIGHTS
         # comment for why (WITS has_fta is currently False for 100% of rows).
-        composite = (
-            s_size * weights["market_size"]
-            + s_growth * weights["market_growth"]
-            + s_quality * weights["market_quality"]
-            + s_price * weights["price_competitiveness"]
-            + s_tariff * weights["tariff"]
-            + s_foothold * weights["afg_foothold"]
-            + s_distance * weights["distance"]
-            + s_language * weights["language"]
-        )
+        #
+        # market_size and market_growth are the two dimensions with no
+        # sensible neutral-default value to fall back to when their
+        # underlying raw data (global_market_size_usd, cagr_pct) is missing
+        # entirely -- rather than guessing, a missing one is dropped from the
+        # composite and the remaining weights renormalised to sum back to
+        # 1.0. This is written to generalise over either or both being
+        # missing at once, not as two separate hardcoded cases.
+        nullable_dims = {"market_size": s_size, "market_growth": s_growth}
+        fixed_dims = {
+            "market_quality": s_quality, "price_competitiveness": s_price,
+            "tariff": s_tariff, "afg_foothold": s_foothold,
+            "distance": s_distance, "language": s_language,
+        }
+        weighted_sum = sum(v * weights[k] for k, v in fixed_dims.items())
+        present_weight = sum(weights[k] for k in fixed_dims)
+        for k, v in nullable_dims.items():
+            if v is not None:
+                weighted_sum += v * weights[k]
+                present_weight += weights[k]
+        composite = weighted_sum / present_weight
         row["opportunity_score"] = round(composite, 2)
 
     return indicator_rows
@@ -626,40 +736,98 @@ def _latest_wb_context(ctx_by_year: dict[int, dict], up_to_year: int) -> dict:
     return merged
 
 
-def _score_market_size(size_usd: float | None, log_max: float) -> float:
-    if size_usd is None or size_usd <= 0:
+def _score_market_size(size_usd: float | None, log_max: float) -> float | None:
+    """
+    Log-transform, then Min-Max normalise against a fixed floor (F) instead
+    of the observed sample minimum -- OECD (2008) Handbook on Constructing
+    Composite Indicators, Step 5: log-transformed prior to normalisation to
+    correct positive skew (§5.1), then normalised by the Min-Max method
+    (§5.3). Departing from the percentile-trimming approach cited at §5.1,
+    the lower bound is set to a fixed exogenous threshold F
+    (MARKET_SIZE_LOG_FLOOR_USD, config.py) rather than the observed minimum,
+    following the external-reference logic of §5.4 -- this avoids the
+    instability the Handbook notes for data-derived bounds (§5.3, "not
+    stable when data for a new time point become available") without
+    collapsing the ranking of the smallest traders. v_max (via log_max,
+    pre-computed by the caller) is still the observed leader for this
+    product, recomputed per product so the leader always scores 100.
+
+    Three distinct states, kept apart deliberately:
+    - size_usd is None: no data at all -- returns None (missing), which the
+      caller excludes from the composite and renormalises the remaining
+      dimensions' weights for, rather than guessing best- or worst-case.
+    - size_usd == 0: a genuine reported zero -- scores 0, same as before.
+    - 0 < size_usd <= F: real but below the noise floor -- clipped to 0
+      rather than going negative (ln(size/F) would be <= 0 here). This
+      shouldn't happen for a well-chosen F on real data; if it does, F is
+      probably set too high (see the derivation note on
+      MARKET_SIZE_LOG_FLOOR_USD in config.py).
+    - size_usd > F: scored on the log scale, min-maxed between F and v_max.
+    """
+    if size_usd is None:
+        return None
+    if size_usd <= 0:
         return 0.0
-    return min(100.0, math.log1p(size_usd) / log_max * 100)
+    if size_usd <= MARKET_SIZE_LOG_FLOOR_USD:
+        return 0.0
+    return max(0.0, min(100.0, 100.0 * math.log(size_usd / MARKET_SIZE_LOG_FLOOR_USD) / log_max))
 
 
-def _score_growth(cagr_pct: float | None) -> float:
-    """Map CAGR% → 0–100. 0% → 50, +20% → 100, -20% → 0."""
+def _score_growth(cagr_pct: float | None) -> float | None:
+    """
+    Min-Max normalise cagr_pct onto 0-100 against a fixed, symmetric
+    external reference band [-W, +W] (W = CAGR_SCORE_BAND_PCT, config.py;
+    not the observed sample min/max) -- same external-reference-over-data-
+    derived-bounds logic as _score_market_size's floor F (OECD 2008
+    Handbook, Step 5, §5.3 Min-Max with the §5.4 external-reference variant
+    in place of the data-derived minimum/maximum). 0% CAGR (no growth) is
+    the natural zero-point of the underlying quantity, so it's centred at
+    the scale's own midpoint, 50 -- that's the direct algebraic result of
+    Min-Max on a range centred at zero, not a separate constant added on
+    top: substituting min=-W, max=+W into (x-min)/(max-min)*100 gives
+    100*(cagr+W)/(2W), which is exactly 50 + cagr*(50/W).
+
+    cagr_pct is None (no data at all, not a genuine 0% reading) returns
+    None -- like _score_market_size, there's no sensible neutral default to
+    guess here, so the caller excludes this dimension from the composite
+    and renormalises the remaining weights, rather than defaulting to 50.
+    """
     if cagr_pct is None:
-        return 50.0  # neutral default
-    return max(0.0, min(100.0, 50.0 + cagr_pct * 2.5))
+        return None
+    return max(0.0, min(100.0, 50.0 + cagr_pct * (50.0 / CAGR_SCORE_BAND_PCT)))
 
 
 def _score_market_quality(ctx: dict) -> float:
-    """Average of LPI, regulatory quality and political stability sub-scores."""
+    """
+    Average of LPI, regulatory quality and political stability sub-scores.
+
+    regulatory_quality and political_stability are both fetched on the WGI
+    "score" scale (GOV_WGI_RQ.SC / GOV_WGI_PV.SC), already 0-100 -- see the
+    note by _WB_INDICATORS in etl/fetch.py. Only lpi_score (1-5) still needs
+    rescaling here.
+    """
     sub: list[float] = []
 
     lpi = ctx.get("lpi_score")
     if lpi is not None:
         sub.append(max(0.0, min(100.0, (lpi - 1) / 4 * 100)))  # 1–5 → 0–100
 
-    for wgi_key in ("regulatory_quality", "political_stability"):
-        val = ctx.get(wgi_key)
-        if val is not None:
-            sub.append(max(0.0, min(100.0, (val + 2.5) / 5.0 * 100)))  # -2.5–2.5 → 0–100
+    reg = ctx.get("regulatory_quality")
+    if reg is not None:
+        sub.append(max(0.0, min(100.0, reg)))  # already 0–100
+
+    pv = ctx.get("political_stability")
+    if pv is not None:
+        sub.append(max(0.0, min(100.0, pv)))  # already 0–100
 
     return float(sum(sub) / len(sub)) if sub else 50.0  # neutral if no data
 
 
 def _score_price(competitiveness: str | None) -> float:
     mapping = {
-        "Highly Competitive": 100.0,
-        "Competitive": 75.0,
-        "Average": 50.0,
+        "Substantially Below Market": 100.0,
+        "Below Market": 75.0,
+        "Near Market": 50.0,
         "Above Market": 25.0,
     }
     return mapping.get(competitiveness or "", 50.0)

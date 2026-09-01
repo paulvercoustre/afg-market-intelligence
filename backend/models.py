@@ -43,8 +43,8 @@ class MarketContext(Base):
     gdp_usd = Column(Numeric(20, 2))
     gdp_per_capita_usd = Column(Numeric(20, 2))
     lpi_score = Column(Numeric(5, 3))
-    regulatory_quality = Column(Numeric(6, 4))
-    political_stability = Column(Numeric(6, 4))
+    regulatory_quality = Column(Numeric(6, 3))  # 0-100 score (GOV_WGI_RQ.SC) -- NUMERIC(6,4) would overflow above 99.9999
+    political_stability = Column(Numeric(6, 3))  # 0-100 score (GOV_WGI_PV.SC) -- NUMERIC(6,4) would overflow above 99.9999
     fetched_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
@@ -121,9 +121,9 @@ class Indicator(Base):
     gdp_per_capita_usd = Column(Numeric(20, 2))
     lpi_score = Column(Numeric(5, 3))
     lpi_score_year = Column(Integer)  # year lpi_score was actually reported for -- LPI is triennial
-    regulatory_quality = Column(Numeric(6, 4))
+    regulatory_quality = Column(Numeric(6, 3))  # 0-100 score (GOV_WGI_RQ.SC) -- NUMERIC(6,4) would overflow above 99.9999
     regulatory_quality_year = Column(Integer)  # WGI lags 1-2 years behind computed_for_year
-    political_stability = Column(Numeric(6, 4))
+    political_stability = Column(Numeric(6, 3))  # 0-100 score (GOV_WGI_PV.SC) -- NUMERIC(6,4) would overflow above 99.9999
     political_stability_year = Column(Integer)
 
     # WITS tariff data

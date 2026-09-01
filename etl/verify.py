@@ -41,6 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from config import MARKET_SIZE_LOG_FLOOR_USD  # noqa: E402
 from etl import fetch  # noqa: E402
 
 
@@ -101,6 +102,42 @@ def check_market_context_completeness(engine) -> dict:
     return dict(row._mapping) if row else {}
 
 
+def check_market_size_floor_calibration(engine) -> dict:
+    """
+    Sanity-check that MARKET_SIZE_LOG_FLOOR_USD (F, config.py) still looks
+    well-calibrated against the live data, without ever changing it itself.
+
+    F is deliberately a fixed, externally-set reference -- not recomputed
+    per ETL run -- because a data-derived bound would make opportunity_score
+    unstable across runs (the same market could score differently between
+    months purely because the bound moved, not because anything about the
+    market changed; see F's derivation note in config.py for the full
+    reasoning, citing OECD 2008 Handbook §5.3's own warning about this).
+    This check exists so staleness still gets caught -- same spirit as
+    check_score_bounds catching a stale WGI scale -- as a WARNING for a
+    human to review and deliberately re-derive F, never a silent auto-fix.
+
+    Reports how many rows have real (non-null, > 0) global_market_size_usd
+    at or below F -- these score 0 as "below the noise floor" rather than a
+    genuine zero. A small, stable count (the handful of likely-noise values
+    F was originally derived against) is expected; a growing count means
+    the data's scale has shifted and F is now too high.
+    """
+    sql = text("""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (
+                WHERE global_market_size_usd > 0 AND global_market_size_usd <= :floor
+            ) AS clipped_real,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY score_market_size) AS median_score
+        FROM indicators
+        WHERE global_market_size_usd IS NOT NULL
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"floor": MARKET_SIZE_LOG_FLOOR_USD}).fetchone()
+    return dict(row._mapping) if row else {}
+
+
 def check_market_share_consistency(engine, tolerance_pct: float = 0.1) -> list[dict]:
     """market_share_pct should equal afg_export_value_usd / global_market_size_usd * 100."""
     sql = text("""
@@ -119,11 +156,20 @@ def check_market_share_consistency(engine, tolerance_pct: float = 0.1) -> list[d
 
 
 def check_score_bounds(engine) -> list[dict]:
-    """opportunity_score and every sub-score must fall within [0, 100]."""
+    """
+    opportunity_score, every sub-score, and regulatory_quality/political_stability
+    must fall within [0, 100]. The latter two are raw World Bank fields, not
+    derived scores, but they're included here (rather than a separate check)
+    because they're fetched on the WGI "score" scale (GOV_WGI_RQ.SC /
+    GOV_WGI_PV.SC), which is 0-100 same as the scores -- a stale row still
+    holding the old -2.5..2.5 "estimate" scale value is exactly the kind of
+    out-of-range value this check exists to catch.
+    """
     score_cols = [
         "opportunity_score", "score_market_size", "score_market_growth",
         "score_market_quality", "score_price_competitiveness", "score_afg_foothold",
         "score_distance", "score_language", "score_fta", "score_tariff",
+        "regulatory_quality", "political_stability",
     ]
     conditions = " OR ".join(f"({c} < 0 OR {c} > 100)" for c in score_cols)
     sql = text(f"""
@@ -186,6 +232,21 @@ def run_internal_checks(engine) -> bool:
             log(f"  {field}: {n}/{total} ({pct:.1f}%) missing")
     else:
         logger.warning("  market_context table is empty")
+
+    logger.info("── Market-size floor (F) calibration ──")
+    floor_stats = check_market_size_floor_calibration(engine)
+    floor_total = floor_stats.get("total") or 0
+    if floor_total:
+        clipped = floor_stats.get("clipped_real") or 0
+        pct = clipped / floor_total * 100
+        log = logger.warning if pct > 1 else logger.info
+        log(f"  {clipped}/{floor_total} ({pct:.1f}%) real markets clipped to 0 at F=${MARKET_SIZE_LOG_FLOOR_USD}"
+            + ("  -- re-derive F, see its note in config.py" if pct > 1 else ""))
+        median = floor_stats.get("median_score")
+        if median is not None:
+            logger.info(f"  median score_market_size: {float(median):.1f}")
+    else:
+        logger.info("  no rows with global_market_size_usd to check")
 
     logger.info("── market_share_pct consistency ──")
     mismatches = check_market_share_consistency(engine)

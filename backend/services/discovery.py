@@ -356,7 +356,7 @@ def _build_next_steps(row, market_code: str) -> list[dict]:
         })
         order += 1
 
-    if competitiveness in ("Highly Competitive", "Competitive"):
+    if competitiveness in ("Substantially Below Market", "Below Market"):
         steps.append({
             "order": order,
             "title": "Lead with price in buyer outreach",

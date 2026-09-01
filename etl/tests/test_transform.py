@@ -113,6 +113,66 @@ class TestGrowthMetrics:
         result = _growth_metrics(df, [2022, 2023])
         assert result["pct"] is None
         assert result["absolute"] == pytest.approx(1_000)
+        # A window search can't recover a usable cagr from a $0 opening year
+        # either (division by zero), but that's fine -- absolute/pct above
+        # don't depend on it, and cagr/first_year/last_year correctly stay
+        # None together rather than reporting a span with no real cagr.
+        assert result["cagr"] is None
+        assert result["first_year"] is None
+        assert result["last_year"] is None
+
+    def test_cagr_falls_back_past_a_near_zero_opening_year(self):
+        # Real case (Dried Apricots -> France): a $6.35 trace opening year
+        # makes the naive 2022-2025 cagr an artifact (+1080%), masking that
+        # the market actually declined once that opening year is dropped.
+        # It also made the stored growth_pct read +164,046% (the same
+        # artifact, un-annualized) -- pct must share cagr's fixed window.
+        df = pd.DataFrame({
+            "year": [2022, 2023, 2024, 2025],
+            "trade_value_usd": [6.35, 72_692.83, 19_165.71, 10_423.27],
+        })
+        result = _growth_metrics(df, [2022, 2023, 2024, 2025])
+        assert result["first_year"] == 2023
+        assert result["last_year"] == 2025
+        assert result["cagr"] == pytest.approx(-62.13, abs=0.01)
+        assert result["pct"] == pytest.approx(-85.66, abs=0.01)
+        # absolute is the one exception -- it's unaffected by the cagr
+        # window search, and still describes the full raw 2022-2025 span.
+        assert result["absolute"] == pytest.approx(10_423.27 - 6.35)
+
+    def test_cagr_falls_back_past_an_anomalous_final_year(self):
+        # Same idea, opposite end: a one-off spike in the LAST year (not a
+        # near-zero base) makes the naive cagr an artifact too. The search
+        # isn't limited to trimming the start -- it keeps narrowing until
+        # it finds any sensical window, which here means excluding 2024.
+        df = pd.DataFrame({
+            "year": [2022, 2023, 2024],
+            "trade_value_usd": [10_000, 12_000, 5_000_000],
+        })
+        result = _growth_metrics(df, [2022, 2023, 2024])
+        assert result["first_year"] == 2022
+        assert result["last_year"] == 2023
+        assert result["cagr"] == pytest.approx(20.0, abs=0.01)
+        # Same 1-year window, so pct (un-annualized) equals cagr here --
+        # they only diverge for windows longer than 1 year.
+        assert result["pct"] == pytest.approx(20.0, abs=0.01)
+
+    def test_cagr_none_when_no_window_is_sensical(self):
+        # Only 2 data points -- if the one and only possible window still
+        # isn't sensical, there's nothing smaller to fall back to.
+        df = pd.DataFrame({
+            "year": [2022, 2023],
+            "trade_value_usd": [10, 1_000],
+        })
+        result = _growth_metrics(df, [2022, 2023])
+        assert result["cagr"] is None
+        assert result["first_year"] is None
+        assert result["last_year"] is None
+        # pct shares cagr's window search -- no sensical window means pct
+        # is None too, not the raw (equally artifact-prone) 9900% figure.
+        assert result["pct"] is None
+        # absolute is unaffected either way -- always the full raw span.
+        assert result["absolute"] == pytest.approx(990.0)
 
 
 class TestComputeIndicators:
@@ -141,9 +201,9 @@ class TestComputeIndicators:
     def test_price_competitiveness_label(self, mirror_df, global_df):
         rows = compute_indicators(PRODUCT_ID, ["842"], mirror_df, global_df, YEARS)
         row = rows[0]
-        # Afg $10 vs market avg ~$15.67 → ~36% below → Highly Competitive
-        assert row["price_competitiveness"] == "Highly Competitive"
-        assert row["price_vs_market_pct"] < PRICE_COMPETITIVENESS["highly_competitive"]
+        # Afg $10 vs market avg ~$15.67 → ~36% below → Substantially Below Market
+        assert row["price_competitiveness"] == "Substantially Below Market"
+        assert row["price_vs_market_pct"] < PRICE_COMPETITIVENESS["substantially_below_market"]
 
     def test_empty_mirror_returns_empty(self, global_df):
         assert compute_indicators(PRODUCT_ID, MARKET_CODES, pd.DataFrame(), global_df, YEARS) == []

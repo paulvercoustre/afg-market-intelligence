@@ -144,7 +144,11 @@ export default async function MarketProfilePage(
                 <StatCard
                   label="CAGR"
                   value={formatPct(profile.trade.growth.cagr_pct)}
-                  sub={`${profile.trade.growth.first_year ?? '?'}–${profile.trade.growth.last_year ?? '?'}`}
+                  sub={
+                    profile.trade.growth.first_year != null && profile.trade.growth.last_year != null
+                      ? `${profile.trade.growth.first_year}–${profile.trade.growth.last_year}`
+                      : undefined
+                  }
                 />
                 <StatCard
                   label="Year-on-year growth"
@@ -178,7 +182,7 @@ export default async function MarketProfilePage(
                     value={formatPct(profile.trade.price.price_vs_market_pct)}
                   />
                   <StatCard
-                    label="Competitiveness"
+                    label="Afghanistan Price"
                     value={profile.trade.price.price_competitiveness ?? '—'}
                     sub={
                       profile.trade.price.price_competitiveness == null
@@ -273,7 +277,7 @@ export default async function MarketProfilePage(
                 label="Regulatory quality"
                 value={
                   profile.context.regulatory_quality != null
-                    ? profile.context.regulatory_quality.toFixed(2)
+                    ? `${profile.context.regulatory_quality.toFixed(1)} / 100`
                     : '—'
                 }
                 dataYear={profile.context.regulatory_quality_year}
@@ -283,7 +287,7 @@ export default async function MarketProfilePage(
                 label="Political stability"
                 value={
                   profile.context.political_stability != null
-                    ? profile.context.political_stability.toFixed(2)
+                    ? `${profile.context.political_stability.toFixed(1)} / 100`
                     : '—'
                 }
                 dataYear={profile.context.political_stability_year}

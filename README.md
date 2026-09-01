@@ -9,7 +9,7 @@ A user selects a product (by HS code or name), and the tool returns a ranked lis
 | Dimension | Weight | Source |
 |-----------|--------|--------|
 | Market size (global imports of this product) | 20% | UN Comtrade |
-| Market growth (CAGR of imports) | 18% | UN Comtrade |
+| Market growth (CAGR of Afghan exports to this market) | 18% | UN Comtrade |
 | Market quality (governance, logistics) | 13% | World Bank WDI/WGI |
 | Price competitiveness | 13% | UN Comtrade |
 | Tariff rate on Afghan goods | 10% | WITS (World Bank) |
@@ -222,8 +222,10 @@ Requested directly for all 5 years in `YEARS`; a given year can come back empty 
 The ETL fetches per-country, per-year indicators from the World Bank API, requested as a single `2021:2025` date range:
 - **GDP** (`NY.GDP.MKTP.CD`) and **GDP per capita** (`NY.GDP.PCAP.CD`) — market wealth / purchasing power
 - **Logistics Performance Index** (`LP.LPI.OVRL.XQ`) — supply-chain connectivity
-- **Regulatory Quality** (`GOV_WGI_RQ.EST`, WGI) — ease of doing business
-- **Political Stability** (`GOV_WGI_PV.EST`, WGI) — market risk
+- **Regulatory Quality** (`GOV_WGI_RQ.SC`, WGI) — ease of doing business, on WGI's 0-100 "score" scale
+- **Political Stability** (`GOV_WGI_PV.SC`, WGI) — market risk, on WGI's 0-100 "score" scale
+
+Both WGI fields deliberately use the `.SC` variant, not the `.EST` (-2.5 to +2.5 "estimate") variant — a plain 0-100 range is clearer to reason about and display.
 
 Coverage isn't even across the requested range: LPI is only published in select years, and the WGI indicators typically lag 1–2 years behind the current year. For each market profile, `lpi_score`, `regulatory_quality`, and `political_stability` each resolve independently to the latest year ≤ the profile's `computed_for_year` with a non-null value — `lpi_score_year`, `regulatory_quality_year`, and `political_stability_year` record which year each one actually came from, since they frequently differ from each other and from `computed_for_year`. `gdp_per_capita_usd` doesn't need this: it's published annually with no gaps, so a missing value there means the fetch failed rather than the data not existing — the WB fetch uses a 60s timeout per 20-country batch for exactly this reason (a 30s timeout was previously dropping GDP-per-capita for large batches of countries on slow responses).
 
@@ -233,6 +235,10 @@ For each market, the ETL queries the WITS TRN (UNCTAD TRAINS) REST API:
 - Falls back to **MFN rates** (partner = World) when no Afghanistan-specific data is available — reported as `MFN`
 
 WITS tariff data typically lags 2–3 years behind trade data, so the ETL walks backward through `YEARS` (2025 → 2021) per market until it finds a reported schedule. The `tariff_indicator` field on each market profile tells you which series the rate came from, and `tariff_year` tells you the actual year WITS reported that rate for — which is frequently earlier than the market profile's `computed_for_year`, since it reflects whenever that country last reported to TRAINS within the requested window (not necessarily 2025).
+
+**A fetched rate is only kept if Afghanistan actually trades there.** WITS reports MFN/Applied tariff schedules for a product even when a market doesn't trade it at all — its own site says so directly ("MFN and Applied Tariff are provided for both traded and non-traded goods") — and the tariff API gives no "is this traded" flag to filter that out. So the ETL derives it from Comtrade instead: a rate is discarded (stored as `NULL`) unless `afg_export_value_usd` shows real Afghan exports to that market, this year or (falling back, same logic as the foothold score) historically. This applies the same way whether WITS reported the rate as `AHS` or `MFN` — that only says which regime the number came from, not whether Afghanistan actually trades there.
+
+A discarded rate falls back to `score_tariff = 50` (neutral), the same as any other unavailable dimension — deliberately not 0. A market with no Afghan trade history already scores low on `score_afg_foothold`; also zeroing `score_tariff` for the same underlying fact would double-penalize it across two dimensions (22% of the composite combined) and bias the tool against exactly the untapped markets it's meant to surface.
 
 ### Static lookups
 - **Distance from Kabul** — approximate straight-line km for ~60 trading partners
