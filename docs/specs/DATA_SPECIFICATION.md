@@ -152,6 +152,10 @@ with UN numeric country codes):
 
 **Strategy:** Per market, for each year (descending, 2025 → 2021), fetch the reporter's full tariff schedule (`product/all`) once per (reporter, partner, year) and cache it across products. If no Afghanistan-specific rates exist, use MFN. WITS data typically lags 2–3 years behind Comtrade, so the year that actually yields data is often earlier than the latest year requested.
 
+**Non-traded goods filter:** WITS reports MFN/Applied rates for a product even when the reporter doesn't actually trade it at all — its own site states this directly ("MFN and Applied Tariff are provided for both traded and non-traded goods") — and the tariff API response carries no "is this traded" flag to distinguish the two. `enrich_indicators_with_scores()` derives that signal from Comtrade instead: a fetched rate is discarded (`tariff_rate_pct`/`tariff_indicator`/`tariff_year` all `NULL`, `has_fta` forced `False`) unless `afg_export_value_usd` shows real Afghan exports to that market — this year, or (same fallback the foothold score uses) historically via `afg_last_export_value_usd`. Applies identically regardless of whether WITS reported the rate as `AHS` or `MFN`.
+
+A rate discarded this way falls back to `score_tariff = 50` (neutral) via the same missing-data handling as any other unscoreable dimension (§4.6) — deliberately not 0. `score_afg_foothold` already scores low for a market with no Afghan trade history; zeroing `score_tariff` for the identical underlying fact would double-count it across two dimensions (22% of the composite combined) and penalize the untapped markets the tool exists to surface.
+
 **Granularity:** 6-digit HS code, country (UN numeric code), annual.
 
 **Storage:** Denormalised into `indicators.tariff_rate_pct`, `indicators.tariff_indicator`, and `indicators.tariff_year` (migration 0004) — the last one records the actual year WITS reported the stored rate for, since it can differ from the row's `computed_for_year`.

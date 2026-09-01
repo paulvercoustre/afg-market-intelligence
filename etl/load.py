@@ -272,6 +272,34 @@ def load_market_context(engine: Engine) -> list[dict]:
         return [dict(row._mapping) for row in result]
 
 
+def load_tariffs_for_product(engine: Engine, product_id: int) -> dict[str, dict]:
+    """
+    Read back this product's previously-stored tariff data, keyed by market
+    code -- used by --skip-tariffs, and when a live WITS fetch fails
+    entirely, so scoring keeps using real historical tariff data instead of
+    silently treating every market as if it had none. Without this, a
+    tariffs={} run doesn't just leave tariff_rate_pct/tariff_indicator/
+    tariff_year null on write -- it also recomputes score_tariff (and
+    therefore opportunity_score) using the neutral no-tariff default,
+    permanently overwriting a previously-correct score with a wrong one.
+    """
+    sql = text("""
+        SELECT market_code, tariff_rate_pct, tariff_indicator, tariff_year
+        FROM indicators
+        WHERE product_id = :product_id AND tariff_rate_pct IS NOT NULL
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"product_id": product_id}).mappings().all()
+    return {
+        r["market_code"]: {
+            "rate": float(r["tariff_rate_pct"]),
+            "indicator": r["tariff_indicator"],
+            "year": r["tariff_year"],
+        }
+        for r in rows
+    }
+
+
 def log_pipeline_run(engine: Engine, status: str, products_updated: int,
                      errors: list[dict]) -> None:
     # CAST(... AS JSONB) instead of ::jsonb — SQLAlchemy's text() mis-parses

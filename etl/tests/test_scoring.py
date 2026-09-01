@@ -277,3 +277,51 @@ class TestEnrichIndicatorsWithScores:
 
     def test_empty_input_passthrough(self):
         assert enrich_indicators_with_scores([], {}, {}) == []
+
+    def test_tariff_discarded_when_afghanistan_has_no_trade_evidence(self, sample_indicator_row):
+        # WITS reports MFN/Applied rates even for products a market doesn't
+        # actually trade at all (its own site says so: "MFN and Applied
+        # Tariff are provided for both traded and non-traded goods"), and
+        # the tariff API response has no "is this traded" flag to filter
+        # those out. A market with zero real Afghan export evidence -- this
+        # year AND historically -- must not keep a fetched rate, regardless
+        # of whether WITS labelled it AHS or MFN.
+        row = sample_indicator_row.copy()
+        row["afg_export_value_usd"] = None
+        row["afg_last_export_value_usd"] = None
+        rows = enrich_indicators_with_scores(
+            [row], market_context={}, all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 12.5, "indicator": "AHS", "year": 2022}},
+        )
+        enriched = rows[0]
+        assert enriched["tariff_rate_pct"] is None
+        assert enriched["tariff_indicator"] is None
+        assert enriched["tariff_year"] is None
+        assert enriched["has_fta"] is False
+        assert enriched["score_tariff"] == pytest.approx(50.0)  # neutral default
+
+    def test_tariff_kept_when_only_historical_trade_evidence_exists(self, sample_indicator_row):
+        # No trade this year, but a real historical shipment on record --
+        # same "don't discard useful signal over a reporting gap" logic
+        # already used for the foothold score.
+        row = sample_indicator_row.copy()
+        row["afg_export_value_usd"] = None
+        row["afg_last_export_value_usd"] = 1_000_000.0
+        rows = enrich_indicators_with_scores(
+            [row], market_context={}, all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 12.5, "indicator": "AHS", "year": 2022}},
+        )
+        assert rows[0]["tariff_rate_pct"] == pytest.approx(12.5)
+
+    def test_tariff_kept_for_tiny_but_real_trade_value(self, sample_indicator_row):
+        # A genuine but very small export value must still count as real
+        # trade evidence -- this is a raw-value check, not a rounded or
+        # displayed figure.
+        row = sample_indicator_row.copy()
+        row["afg_export_value_usd"] = 12.0
+        row["afg_last_export_value_usd"] = None
+        rows = enrich_indicators_with_scores(
+            [row], market_context={}, all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 8.0, "indicator": "MFN", "year": 2023}},
+        )
+        assert rows[0]["tariff_rate_pct"] == pytest.approx(8.0)

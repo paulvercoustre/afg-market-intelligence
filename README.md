@@ -236,6 +236,10 @@ For each market, the ETL queries the WITS TRN (UNCTAD TRAINS) REST API:
 
 WITS tariff data typically lags 2–3 years behind trade data, so the ETL walks backward through `YEARS` (2025 → 2021) per market until it finds a reported schedule. The `tariff_indicator` field on each market profile tells you which series the rate came from, and `tariff_year` tells you the actual year WITS reported that rate for — which is frequently earlier than the market profile's `computed_for_year`, since it reflects whenever that country last reported to TRAINS within the requested window (not necessarily 2025).
 
+**A fetched rate is only kept if Afghanistan actually trades there.** WITS reports MFN/Applied tariff schedules for a product even when a market doesn't trade it at all — its own site says so directly ("MFN and Applied Tariff are provided for both traded and non-traded goods") — and the tariff API gives no "is this traded" flag to filter that out. So the ETL derives it from Comtrade instead: a rate is discarded (stored as `NULL`) unless `afg_export_value_usd` shows real Afghan exports to that market, this year or (falling back, same logic as the foothold score) historically. This applies the same way whether WITS reported the rate as `AHS` or `MFN` — that only says which regime the number came from, not whether Afghanistan actually trades there.
+
+A discarded rate falls back to `score_tariff = 50` (neutral), the same as any other unavailable dimension — deliberately not 0. A market with no Afghan trade history already scores low on `score_afg_foothold`; also zeroing `score_tariff` for the same underlying fact would double-penalize it across two dimensions (22% of the composite combined) and bias the tool against exactly the untapped markets it's meant to surface.
+
 ### Static lookups
 - **Distance from Kabul** — approximate straight-line km for ~60 trading partners
 - **Language similarity** — scored 0–1 based on Dari/Pashto overlap with trade-communication languages

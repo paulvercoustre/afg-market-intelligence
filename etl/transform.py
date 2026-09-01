@@ -542,7 +542,26 @@ def enrich_indicators_with_scores(
         row["political_stability_year"] = ctx.get("political_stability_year")
 
         # ── Tariff (WITS) ─────────────────────────────────────────────────────
+        # WITS deliberately reports MFN/Applied tariff rates for products a
+        # market doesn't actually trade at all -- its own site says so
+        # outright ("MFN and Applied Tariff are provided for both traded and
+        # non-traded goods"), and there's no "is this traded" flag anywhere
+        # in the tariff API response to filter those out. So this is derived
+        # from our own Comtrade data instead: a rate is only trusted if
+        # Afghanistan has real export evidence for this market -- this year
+        # or (falling back, same as the foothold score) historically. This
+        # is a raw-value check (> 0 on the actual float), not a rounded or
+        # displayed figure, so a genuine but tiny shipment still counts as
+        # traded. Applies the same way regardless of whether WITS reported
+        # the rate as AHS or MFN -- that only says which regime the rate
+        # came from, not whether Afghanistan actually trades here.
+        has_afg_trade_evidence = (
+            (row.get("afg_export_value_usd") or 0) > 0
+            or (row.get("afg_last_export_value_usd") or 0) > 0
+        )
         tariff_info = tariffs.get(mc) or {}
+        if not has_afg_trade_evidence:
+            tariff_info = {}
         tariff_rate = tariff_info.get("rate")
         row["tariff_rate_pct"] = tariff_rate
         row["tariff_indicator"] = tariff_info.get("indicator")

@@ -235,6 +235,47 @@ class TestBulkUpsertIndicators:
         assert load.bulk_upsert_indicators(pg_engine, []) == 0
 
 
+class TestLoadTariffsForProduct:
+    """
+    Regression coverage for the bug where --skip-tariffs (or a live WITS
+    fetch failing entirely) passed tariffs={} into scoring, which didn't
+    just leave tariff_rate_pct null on write -- it recomputed score_tariff
+    and opportunity_score using the neutral no-tariff default too,
+    permanently clobbering a previously-correct score. load_tariffs_for_product
+    is what run.py now falls back to in both cases instead of {}.
+    """
+
+    def test_reads_back_previously_stored_tariffs(self, pg_engine, product_id, mirror_df, global_df):
+        rows = compute_indicators(product_id, ["699", "586"], mirror_df, global_df, YEARS)
+        rows = enrich_indicators_with_scores(
+            rows, market_context={}, all_market_sizes={"699": 10_000_000, "586": 5_000_000},
+            tariffs={
+                "699": {"rate": 12.5, "indicator": "AHS", "year": 2022},
+                "586": {"rate": 5.0, "indicator": "MFN", "year": 2023},
+            },
+        )
+        load.bulk_upsert_indicators(pg_engine, rows)
+
+        tariffs = load.load_tariffs_for_product(pg_engine, product_id)
+
+        assert tariffs["699"] == {"rate": 12.5, "indicator": "AHS", "year": 2022}
+        assert tariffs["586"] == {"rate": 5.0, "indicator": "MFN", "year": 2023}
+
+    def test_excludes_rows_with_no_tariff_on_record(self, pg_engine, product_id, mirror_df, global_df):
+        # No tariffs dict passed at all -> tariff_rate_pct stays null, same
+        # shape as a --skip-tariffs run on a product that's never had one.
+        rows = compute_indicators(product_id, ["699"], mirror_df, global_df, YEARS)
+        rows = enrich_indicators_with_scores(
+            rows, market_context={}, all_market_sizes={"699": 10_000_000},
+        )
+        load.bulk_upsert_indicators(pg_engine, rows)
+
+        assert load.load_tariffs_for_product(pg_engine, product_id) == {}
+
+    def test_unknown_product_returns_empty(self, pg_engine):
+        assert load.load_tariffs_for_product(pg_engine, 999_999) == {}
+
+
 class TestLogPipelineRun:
     def test_round_trips_errors_json(self, pg_engine):
         errors = [{"hs": "091020", "stage": "fetch_tariffs", "error": "timeout"}]

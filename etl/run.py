@@ -181,14 +181,18 @@ def run_product(
     ind_rows = transform.compute_indicators(product_id, all_codes, mirror_df, global_df, YEARS)
 
     # 9. Fetch tariffs for the markets we'll score
-    tariffs = {}
-    if not skip_tariffs:
+    if skip_tariffs:
+        tariffs = load.load_tariffs_for_product(engine, product_id)
+        logger.info(f"  {tag} Reusing {len(tariffs)} previously-stored tariff rates (--skip-tariffs)")
+    else:
+        tariffs = {}
         try:
             tariffs = _fetch_tariffs_for_product(all_codes, hs_codes, YEARS, refresh_cache=refresh_cache)
             logger.info(f"  {tag} Fetched tariff data for {len(tariffs)} markets")
         except Exception as exc:
-            logger.warning(f"  {tag} Tariff fetch failed: {exc} — continuing without tariff scores")
+            logger.warning(f"  {tag} Tariff fetch failed: {exc} — falling back to previously-stored tariffs")
             errors.append({"hs": ",".join(hs_codes), "stage": "fetch_tariffs", "error": str(exc)})
+            tariffs = load.load_tariffs_for_product(engine, product_id)
 
     # 10. Enrich with opportunity scores
     ind_rows = transform.enrich_indicators_with_scores(
