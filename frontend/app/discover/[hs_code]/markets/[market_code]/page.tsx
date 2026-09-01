@@ -144,7 +144,11 @@ export default async function MarketProfilePage(
                 <StatCard
                   label="CAGR"
                   value={formatPct(profile.trade.growth.cagr_pct)}
-                  sub={`${profile.trade.growth.first_year ?? '?'}–${profile.trade.growth.last_year ?? '?'}`}
+                  sub={
+                    profile.trade.growth.first_year != null && profile.trade.growth.last_year != null
+                      ? `${profile.trade.growth.first_year}–${profile.trade.growth.last_year}`
+                      : undefined
+                  }
                 />
                 <StatCard
                   label="Year-on-year growth"

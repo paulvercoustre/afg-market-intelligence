@@ -140,6 +140,32 @@ class TestCheckMarketContextCompleteness:
         assert result["missing_gdp"] == 0
 
 
+class TestCheckMarketSizeFloorCalibration:
+    def test_empty_table_returns_zero_total(self, pg_engine):
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 0
+
+    def test_counts_real_values_clipped_at_or_below_floor(self, pg_engine, product_id):
+        # config.MARKET_SIZE_LOG_FLOOR_USD is 500 -- 500 and 94 are both real
+        # values at or below it (clipped to 0), 10_000_000 is comfortably above.
+        _insert_indicator(pg_engine, product_id, market_code="699",
+                           global_market_size_usd=500, score_market_size=0.0)
+        _insert_indicator(pg_engine, product_id, market_code="586",
+                           global_market_size_usd=94, score_market_size=0.0)
+        _insert_indicator(pg_engine, product_id, market_code="364",
+                           global_market_size_usd=10_000_000, score_market_size=95.0)
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 3
+        assert result["clipped_real"] == 2
+
+    def test_does_not_count_values_above_the_floor(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, market_code="699",
+                           global_market_size_usd=10_000_000, score_market_size=95.0)
+        result = verify.check_market_size_floor_calibration(pg_engine)
+        assert result["total"] == 1
+        assert result["clipped_real"] == 0
+
+
 class TestCheckMarketShareConsistency:
     def test_clean_when_market_share_matches_recomputed_value(self, pg_engine, product_id):
         # 200,000 / 10,000,000 * 100 = 2.0

@@ -236,12 +236,22 @@ For each (product, market) pair, all supplying countries (excluding world total 
 
 ### 4.4 Growth metrics
 
+All four metrics are computed from Afghanistan's own bilateral export value to that one market, year by year — not the market's overall global import growth (that's `global_market_size_usd`, a separate field feeding `score_market_size`).
+
 | Metric | Formula | Notes |
 |---|---|---|
-| YoY growth | `(value_t − value_{t−1}) / value_{t−1} × 100` | Requires ≥2 years of data |
-| CAGR | `(value_last / value_first)^(1/n) − 1) × 100` | `n` = years between first and last |
-| Absolute growth | `value_last − value_first` | USD |
-| Growth % | `absolute / value_first × 100` | USD |
+| YoY growth | `(value_t − value_{t−1}) / value_{t−1} × 100` | Requires ≥2 years of data. Always the two most recent chronological years — no fallback (see below), since "year over year" is definitionally about consecutive years. |
+| CAGR | `(value_last / value_first)^(1/n) − 1) × 100` | `n` = years between first and last. See "CAGR window fallback" below — `first`/`last` are not always simply the earliest/latest year with data. |
+| Absolute growth | `value_last − value_first` | USD. Always the full raw first/last data points — see "Why absolute stays on the raw span" below. |
+| Growth % | `(value_last − value_first) / value_first × 100`, over the **CAGR-resolved** window | Un-annualized version of the same trend `cagr_pct` describes — see below for why this one moves with the CAGR fallback while Absolute growth doesn't. |
+
+**CAGR window fallback (`_find_sensical_cagr_window()`, `etl/transform.py`):** naively using the literal earliest and latest year with data breaks when one endpoint is a near-zero-base artifact (a single tiny/trace shipment) or an anomalous one-off spike — either can produce a CAGR of thousands of percent that isn't a real trend. Real case: Dried Apricots → France reported $6.35 in 2022, then $72,692.83 / $19,165.71 / $10,423.27 in 2023-2025. The naive 2022→2025 CAGR is +1,080% (an artifact of the $6.35 opening year); dropping 2022 and recomputing 2023→2025 gives −62% — the real trend is a decline, not explosive growth.
+
+The fix: if the naive first/last-year CAGR exceeds ±500% (`etl/transform.py`'s `_MAX_SENSICAL_CAGR_PCT`), retry with a narrower (first_year, last_year) window — widest span first, preferring to trim the earliest year before the latest when spans tie — until one produces a CAGR within that bound, or no window (down to the minimum 2-year span) does, in which case `cagr_pct` is `NULL`. 500% was chosen deliberately loose: it's well above where it would matter to `score_market_growth` anyway (which already saturates at ±20%, so a real 25% CAGR and a fake 100,000% CAGR score identically), so the only job this threshold does is keep the *displayed* `cagr_pct` credible, not affect scoring. Checked against live data (2026-08-28): flags 30 of 691 then-computed `cagr_pct` values (4.3%) for the retry.
+
+`first_year`/`last_year` always describe whichever window `cagr_pct` was ultimately computed over (the frontend shows them as `cagr_pct`'s own sub-label, e.g. "CAGR: 3.6% / 2021–2025") — so if the window narrows, the displayed year range narrows with it, and if no sensical window exists at all, both are `NULL` alongside `cagr_pct` rather than showing a year range for a CAGR that isn't there.
+
+**Why `growth_pct` shares the CAGR window but `absolute_growth_usd` doesn't:** `growth_pct` divides by `value_first` exactly like `cagr_pct` does, so it has the identical near-zero-base blowup vulnerability — before this was fixed, the Dried Apricots/France row above stored `growth_pct = +164,046%` (the same $6.35-base artifact, un-annualized) sitting right next to a correctly-fixed `cagr_pct = −62%`, directly contradicting each other in the same row. `absolute_growth_usd` is a plain subtraction with no such risk, and answers a genuinely different question ("total dollar change across the whole observed history") than the CAGR-window metrics — moving it to the narrower window would also make it `NULL` for a clean `$0 → $1,000` opening year, discarding a real, meaningful fact for no corresponding bug fixed.
 
 ### 4.5 Price competitiveness
 
@@ -284,10 +294,10 @@ Each of eight dimensions is normalised to 0–100, then combined as a weighted s
 
 | Dimension | Weight | Normalisation method |
 |---|---|---|
-| Market size | 20% | `log1p(size) / log1p(max_size) × 100` across all markets for the product |
-| Market growth | 18% | CAGR mapped to 0–100 (negative CAGR → 0, ≥20% → 100) |
+| Market size | 20% | Log min-max vs. a fixed floor F: `100 × ln(size/F) / ln(max_size/F)` across all markets for the product — see below |
+| Market growth | 18% | Min-max vs. a fixed symmetric band ±W: `50 + cagr_pct × (50/W)`, clamped [0,100] — see below |
 | Market quality | 13% | Composite of LPI + regulatory quality + political stability |
-| Price competitiveness | 13% | Label-based: Highly Competitive=100, Competitive=75, Average=50, Above Market=25 |
+| Price competitiveness | 13% | Label-based: Substantially Below Market=100, Below Market=75, Near Market=50, Above Market=25 |
 | Tariff | 12% | `max(0, 100 − rate × 3)` — 0% tariff=100, 33%+=0 |
 | Afghan foothold | 10% | Log-scaled existing export value |
 | Distance | 10% | Inverse distance from Kabul (closer = higher) |
@@ -297,7 +307,26 @@ Weights must sum to 1.0 (enforced in `config.py`).
 
 **FTA access (`score_fta`) is computed but excluded from the composite.** WITS's AFG-specific (`partner=004`) tariff schedule returns "NoRecordsFound" for every reporter checked, so `has_fta` is `False` and `score_fta` is 0 for essentially every row — a weight that could never move the score. Its former 2% share was folded into Tariff (10% → 12%) above. `has_fta`/`score_fta` are still computed per row and stored in `indicators` in case WITS's coverage improves, and remain available via the API, but are no longer part of `opportunity_score` and are not shown in the frontend's score breakdown.
 
-**Missing data handling:** If a dimension cannot be computed (e.g. no WITS tariff), its sub-score defaults to 50 (neutral) and the composite score is still calculated. This avoids excluding markets with data gaps while not over-penalising them. Implemented in `etl/transform.py` (`_score_tariff`, `_score_market_quality`, `_score_distance`, `_score_growth`, `_score_price`).
+**Missing data handling:** If a dimension cannot be computed (e.g. no WITS tariff), its sub-score defaults to 50 (neutral) and the composite score is still calculated. This avoids excluding markets with data gaps while not over-penalising them. Implemented in `etl/transform.py` (`_score_tariff`, `_score_market_quality`, `_score_distance`, `_score_price`). **Market size and market growth are the two exceptions** — see below.
+
+**Market size normalisation (log min-max against a fixed floor).** `_score_market_size()` (`etl/transform.py`) follows OECD (2008, *Handbook on Constructing Composite Indicators*, Step 5, §5.1): the indicator is log-transformed prior to normalisation to correct positive skew, then normalised by the Min-Max method (§5.3). Departing from the percentile-trimming approach the Handbook also discusses in §5.1, and from Min-Max's usual data-derived minimum, the lower bound is set to a fixed exogenous threshold **F** rather than the observed minimum, following the external-reference logic of §5.4 ("Distance to a reference") — this avoids the instability the Handbook notes for data-derived bounds in §5.3 ("not stable when data for a new time point become available... the composite indicator for the existing data must be re-calculated") without collapsing the ranking of the smallest traders.
+
+`F = MARKET_SIZE_LOG_FLOOR_USD = $500` (`config.py`), fixed across every product and year — not recomputed per product. `v_max` (the log-max denominator) *is* recomputed per product, so the largest market for each product still scores exactly 100. Three distinct states, kept apart deliberately:
+- `global_market_size_usd` is `NULL` (no data at all): `score_market_size` is `NULL`, excluded from the composite (see renormalisation below) — rather than guessing a neutral default the way most other dimensions do. (In practice this doesn't currently occur — every scored row has a real market size — but the pipeline handles it correctly if a future data gap produces one.)
+- `global_market_size_usd == 0` (a genuine reported zero): scores 0.
+- `0 < global_market_size_usd ≤ F`: real but below the noise floor — clipped to 0 rather than going negative.
+
+**Market growth normalisation (Min-Max against a fixed symmetric band).** `_score_growth()` (`etl/transform.py`) is the *same* method as market size, applied more directly: plain Min-Max (OECD §5.3) with a fixed external reference range `[-W, +W]` (§5.4) instead of the observed sample min/max. Substituting `min=-W, max=+W` into the general Min-Max formula `(x-min)/(max-min)×100` algebraically simplifies to `50 + cagr_pct×(50/W)` — the `50` isn't a separate constant tacked onto a made-up formula, it's the direct consequence of Min-Max applied to a range centred at zero (0% CAGR, the natural "no growth" point, lands exactly on the output scale's own midpoint).
+
+`W = CAGR_SCORE_BAND_PCT` (`config.py`), fixed across every product and year, same stability rationale as `F` above. **Derived 2026-08-30**, widened from the original `W=20`: pooling `cagr_pct` across every row with a resolved CAGR (n=665) showed p10=−52%, p25=−22%, median=+7.2%, p75=+56%, p90=+129% — `W=20` clamped 446/665 rows (67%) to a flat 0 or 100, providing almost no differentiation between markets. `W=75` sits close to the data's actual P75/\|P25\| spread and clamps only 167/665 (25%). Checked against a chart comparing ±20/±50/±75/±100 side by side before choosing.
+
+`cagr_pct` is `NULL` (no data at all, not a genuine 0% reading) returns `NULL` for `score_market_growth`, excluded from the composite the same way `score_market_size` is — not the neutral-50 default most other dimensions use, since there's no principled "average" CAGR to assume for a market with no growth data at all.
+
+**Renormalisation when market size and/or market growth are missing:** the composite is computed by summing each *present* dimension's `score × weight` and dividing by the sum of only the *present* dimensions' weights — so if one is missing, the remaining weights are rescaled to sum back to 1.0; if both are missing, the remaining 6 dimensions' weights rescale together. This generalises rather than special-casing "market size missing" and "market growth missing" separately (`etl/transform.py`, `enrich_indicators_with_scores`).
+
+**F's derivation:** pooled `global_market_size_usd` across every scored product/market row (n=1042, 2026-08-28) and looked for where real trade ends and rounding/reporting noise begins. The data shows a ~3.5× gap between three likely-noise values under $200 (Saffron/Kyrgyzstan $94, Apricots/Yemen $132, Dried Apricots/Yemen $160) and a continuous cluster of plausible small-but-real markets starting at $562 (Dried Figs/Liberia). F=$500 sits just below that cluster: it clips the 3 likely-noise values to 0 while every other observed market scores positive (no real trader clipped). Checked at F=$100/$500/$1,000/$2,000 against Dried Figs (leader: India, $207.8M) — at F=$1,000, Liberia's real $562 market clips to 0; at F=$500 it scores a small but positive 0.9, which is the intended "tiny but real" signal.
+
+**F is fixed, not recomputed per ETL run.** Recalculating it fresh from each run's data would reintroduce exactly the instability OECD §5.3 warns about — the same market could score differently month to month purely because the bound moved, not because anything about the market changed. Instead, `etl.verify`'s `check_market_size_floor_calibration()` runs on every ETL and reports (as a `WARNING`, not a hard failure) how many real markets are clipping at the floor — a small, stable count (the 3 above) is expected; a growing one signals the data's scale has shifted and F should be manually re-derived using the same process described above, following the same "flag for human review, don't auto-correct" pattern as `check_score_bounds`.
 
 ### 4.7 Country code conventions
 

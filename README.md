@@ -9,7 +9,7 @@ A user selects a product (by HS code or name), and the tool returns a ranked lis
 | Dimension | Weight | Source |
 |-----------|--------|--------|
 | Market size (global imports of this product) | 20% | UN Comtrade |
-| Market growth (CAGR of imports) | 18% | UN Comtrade |
+| Market growth (CAGR of Afghan exports to this market) | 18% | UN Comtrade |
 | Market quality (governance, logistics) | 13% | World Bank WDI/WGI |
 | Price competitiveness | 13% | UN Comtrade |
 | Tariff rate on Afghan goods | 10% | WITS (World Bank) |

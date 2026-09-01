@@ -87,6 +87,61 @@ NATIVE_UNIT_PRICE_BASES = {"m²", "u"}
 # score_afg_foothold already log-scale dollar values for the same reason.
 MAX_GREAT_CIRCLE_DISTANCE_KM = 20_015
 
+# Market-size scoring floor (F): the lower anchor for score_market_size's
+# log min-max normalisation (etl/transform.py, _score_market_size), used in
+# place of the observed sample minimum -- see OECD (2008) Handbook on
+# Constructing Composite Indicators, Step 5 (§5.1 log transform, §5.3
+# Min-Max, §5.4 external-reference logic for why a fixed exogenous floor is
+# used here instead of §5.3's usual data-derived minimum). See
+# docs/specs/DATA_SPECIFICATION.md for the full formula and empirical
+# derivation of this value.
+#
+# Derived 2026-08-28 by pooling global_market_size_usd across every scored
+# product/market row (n=1042): the data shows a clean break between three
+# likely-noise values below $200 (Saffron/Kyrgyzstan $94, Apricots/Yemen
+# $132, Dried Apricots/Yemen $160 -- isolated by a ~3.5x gap from the next
+# value) and a continuous cluster of plausible small-but-real markets
+# starting at $562 (Dried Figs/Liberia) and running smoothly upward from
+# there. $500 sits just below that cluster, per the "set F just below the
+# smallest genuine trade value" rule: it clips the 3 likely-noise values to
+# 0 while keeping every other observed market in the dataset scoring
+# positive (no real trader clipped).
+#
+# Deliberately NOT recomputed automatically on each ETL run -- a data-derived
+# bound would make opportunity_score unstable across runs (the same market
+# could score differently between months purely because the bound moved),
+# which is exactly the instability OECD §5.3 warns about and the reason this
+# floor is external in the first place. Instead, etl.verify's
+# check_market_size_floor_calibration() runs every ETL and WARNS (without
+# changing anything) if the count of real values clipped at this floor grows
+# beyond the handful expected here -- that's the signal to manually re-derive
+# F, the same way check_score_bounds flags a stale WGI scale for a human to
+# fix rather than auto-correcting it.
+MARKET_SIZE_LOG_FLOOR_USD = 500
+
+# Market-growth scoring reference band (W): score_market_growth Min-Max
+# normalises cagr_pct onto 0-100 against a fixed, symmetric external range
+# [-W, +W] -- same external-reference-over-data-derived-bounds logic as
+# MARKET_SIZE_LOG_FLOOR_USD above (OECD 2008 Handbook, Step 5, §5.3 Min-Max
+# with the §5.4 external-reference variant). See
+# docs/specs/DATA_SPECIFICATION.md §4.6 for the full formula.
+#
+# Derived 2026-08-30 by pooling cagr_pct across every row with a resolved
+# CAGR (n=665, after the sensical-window fallback above removed near-zero-
+# base artifacts): p10=-52%, p25=-22%, median=+7.2%, p75=+56%, p90=+129%.
+# The previous W=20 clamped 446/665 rows (67%) to a flat 0 or 100 -- far
+# too narrow to differentiate most real markets. W=75 sits close to the
+# data's actual P75/|P25| spread (+56%/-22%) and clamps only 167/665 (25%),
+# spreading most real variation across the scale instead of piling it up
+# at the extremes.
+#
+# Deliberately NOT data-derived or auto-recomputed per ETL run, for the
+# identical stability reason as MARKET_SIZE_LOG_FLOOR_USD: a bound that
+# moves with each run's data would make opportunity_score incomparable
+# month to month. Re-derive by hand if the underlying growth data's spread
+# shifts meaningfully.
+CAGR_SCORE_BAND_PCT = 75
+
 # ── Comtrade numeric reporter code → ISO-3 alpha code ──────────────────────────
 # NB: Comtrade uses non-standard codes for a few countries (India 699, USA 842,
 # Switzerland 757, France 251, Norway 579) — these must match the codes that
