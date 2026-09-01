@@ -114,8 +114,8 @@ Sources from the scoping note are classified into three tiers based on current i
 | `gdp_usd` | `NY.GDP.MKTP.CD` | GDP (current USD) |
 | `gdp_per_capita_usd` | `NY.GDP.PCAP.CD` | GDP per capita (current USD) |
 | `lpi_score` | `LP.LPI.OVRL.XQ` | Logistics Performance Index (overall) |
-| `regulatory_quality` | `GOV_WGI_RQ.EST` | WGI: Regulatory Quality (estimate) |
-| `political_stability` | `GOV_WGI_PV.EST` | WGI: Political Stability (estimate) |
+| `regulatory_quality` | `GOV_WGI_RQ.SC` | WGI: Regulatory Quality (score, 0-100) |
+| `political_stability` | `GOV_WGI_PV.SC` | WGI: Political Stability (score, 0-100) |
 
 **Granularity:** Country (ISO-3), annual.
 
@@ -356,8 +356,8 @@ World Bank development indicators per country per year.
 | `gdp_usd` | NUMERIC(20,2) | Yes | GDP, current USD | `NY.GDP.MKTP.CD` |
 | `gdp_per_capita_usd` | NUMERIC(20,2) | Yes | GDP per capita, current USD | `NY.GDP.PCAP.CD` |
 | `lpi_score` | NUMERIC(5,3) | Yes | Logistics Performance Index | `LP.LPI.OVRL.XQ` |
-| `regulatory_quality` | NUMERIC(6,4) | Yes | WGI regulatory quality estimate | `RQ.EST` |
-| `political_stability` | NUMERIC(6,4) | Yes | WGI political stability estimate | `PV.EST` |
+| `regulatory_quality` | NUMERIC(6,3) | Yes | WGI regulatory quality score (0-100) | `RQ.SC` |
+| `political_stability` | NUMERIC(6,3) | Yes | WGI political stability score (0-100) | `PV.SC` |
 | `fetched_at` | TIMESTAMPTZ | NOT NULL | ETL fetch timestamp | System |
 
 **Unique key:** (`country_code`, `year`).
@@ -441,9 +441,9 @@ Pre-computed trade indicators and opportunity scores. One row per (product, mark
 | `gdp_per_capita_usd` | NUMERIC(20,2) | GDP per capita | World Bank |
 | `lpi_score` | NUMERIC(5,3) | Logistics Performance Index | World Bank |
 | `lpi_score_year` | INTEGER | Year `lpi_score` was actually reported for (LPI is triennial — can lag `computed_for_year`) | World Bank |
-| `regulatory_quality` | NUMERIC(6,4) | Regulatory quality estimate | World Bank |
+| `regulatory_quality` | NUMERIC(6,3) | Regulatory quality score (0-100) | World Bank |
 | `regulatory_quality_year` | INTEGER | Year `regulatory_quality` was actually reported for (WGI lags 1–2 years) | World Bank |
-| `political_stability` | NUMERIC(6,4) | Political stability estimate | World Bank |
+| `political_stability` | NUMERIC(6,3) | Political stability score (0-100) | World Bank |
 | `political_stability_year` | INTEGER | Year `political_stability` was actually reported for | World Bank |
 | **WITS tariff** | | | |
 | `tariff_rate_pct` | NUMERIC(6,3) | Import tariff rate % | WITS |

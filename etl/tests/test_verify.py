@@ -180,6 +180,32 @@ class TestCheckScoreBounds:
         assert len(results) == 1
         assert float(results[0]["opportunity_score"]) == -10.0
 
+    def test_detects_political_stability_on_old_estimate_scale(self, pg_engine, product_id):
+        # Regression test: political_stability is fetched on the WGI "score"
+        # scale (0-100, GOV_WGI_PV.SC) -- a stale row still holding a value
+        # from the old -2.5..2.5 "estimate" scale (GOV_WGI_PV.EST) must be
+        # caught here, the same way an out-of-range score is.
+        _insert_indicator(pg_engine, product_id, political_stability=-0.6)
+        results = verify.check_score_bounds(pg_engine)
+        assert len(results) == 1
+        assert float(results[0]["political_stability"]) == -0.6
+
+    def test_clean_when_political_stability_in_0_100_range(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, political_stability=25.03)
+        assert verify.check_score_bounds(pg_engine) == []
+
+    def test_detects_regulatory_quality_on_old_estimate_scale(self, pg_engine, product_id):
+        # Same regression as political_stability above, but for
+        # regulatory_quality (GOV_WGI_RQ.SC vs the old GOV_WGI_RQ.EST).
+        _insert_indicator(pg_engine, product_id, regulatory_quality=-0.1)
+        results = verify.check_score_bounds(pg_engine)
+        assert len(results) == 1
+        assert float(results[0]["regulatory_quality"]) == -0.1
+
+    def test_clean_when_regulatory_quality_in_0_100_range(self, pg_engine, product_id):
+        _insert_indicator(pg_engine, product_id, regulatory_quality=45.5)
+        assert verify.check_score_bounds(pg_engine) == []
+
 
 class TestCheckProductCoverage:
     def test_reports_covered_and_missing_products(self, pg_engine, product_id):

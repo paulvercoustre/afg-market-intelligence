@@ -273,7 +273,7 @@ export default async function MarketProfilePage(
                 label="Regulatory quality"
                 value={
                   profile.context.regulatory_quality != null
-                    ? profile.context.regulatory_quality.toFixed(2)
+                    ? `${profile.context.regulatory_quality.toFixed(1)} / 100`
                     : '—'
                 }
                 dataYear={profile.context.regulatory_quality_year}
@@ -283,7 +283,7 @@ export default async function MarketProfilePage(
                 label="Political stability"
                 value={
                   profile.context.political_stability != null
-                    ? profile.context.political_stability.toFixed(2)
+                    ? `${profile.context.political_stability.toFixed(1)} / 100`
                     : '—'
                 }
                 dataYear={profile.context.political_stability_year}

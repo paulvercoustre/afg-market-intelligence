@@ -222,8 +222,10 @@ Requested directly for all 5 years in `YEARS`; a given year can come back empty 
 The ETL fetches per-country, per-year indicators from the World Bank API, requested as a single `2021:2025` date range:
 - **GDP** (`NY.GDP.MKTP.CD`) and **GDP per capita** (`NY.GDP.PCAP.CD`) — market wealth / purchasing power
 - **Logistics Performance Index** (`LP.LPI.OVRL.XQ`) — supply-chain connectivity
-- **Regulatory Quality** (`GOV_WGI_RQ.EST`, WGI) — ease of doing business
-- **Political Stability** (`GOV_WGI_PV.EST`, WGI) — market risk
+- **Regulatory Quality** (`GOV_WGI_RQ.SC`, WGI) — ease of doing business, on WGI's 0-100 "score" scale
+- **Political Stability** (`GOV_WGI_PV.SC`, WGI) — market risk, on WGI's 0-100 "score" scale
+
+Both WGI fields deliberately use the `.SC` variant, not the `.EST` (-2.5 to +2.5 "estimate") variant — a plain 0-100 range is clearer to reason about and display.
 
 Coverage isn't even across the requested range: LPI is only published in select years, and the WGI indicators typically lag 1–2 years behind the current year. For each market profile, `lpi_score`, `regulatory_quality`, and `political_stability` each resolve independently to the latest year ≤ the profile's `computed_for_year` with a non-null value — `lpi_score_year`, `regulatory_quality_year`, and `political_stability_year` record which year each one actually came from, since they frequently differ from each other and from `computed_for_year`. `gdp_per_capita_usd` doesn't need this: it's published annually with no gaps, so a missing value there means the fetch failed rather than the data not existing — the WB fetch uses a 60s timeout per 20-country batch for exactly this reason (a 30s timeout was previously dropping GDP-per-capita for large batches of countries on slow responses).
 

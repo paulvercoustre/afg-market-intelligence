@@ -198,12 +198,18 @@ _WB_BASE = "https://api.worldbank.org/v2"
 # Indicator codes we fetch from WDI and WGI.
 # NB: the WGI codes were renamed by the World Bank — the old RQ.EST / PV.EST
 # codes are archived and return "indicator not found".
+#
+# Both WGI fields deliberately use the .SC ("Governance score, 0-100")
+# variant instead of the .EST ("Governance estimate, approx -2.5 to +2.5")
+# variant -- a plain 0-100 range is much clearer to reason about (and to
+# display) than a signed, roughly-normal estimate. Neither needs rescaling
+# in _score_market_quality() in etl/transform.py; both are used as-is.
 _WB_INDICATORS = {
     "gdp_usd": "NY.GDP.MKTP.CD",
     "gdp_per_capita_usd": "NY.GDP.PCAP.CD",
     "lpi_score": "LP.LPI.OVRL.XQ",
-    "regulatory_quality": "GOV_WGI_RQ.EST",
-    "political_stability": "GOV_WGI_PV.EST",
+    "regulatory_quality": "GOV_WGI_RQ.SC",
+    "political_stability": "GOV_WGI_PV.SC",
 }
 
 _WB_SESSION = requests.Session()

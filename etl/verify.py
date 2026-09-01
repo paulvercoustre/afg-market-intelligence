@@ -119,11 +119,20 @@ def check_market_share_consistency(engine, tolerance_pct: float = 0.1) -> list[d
 
 
 def check_score_bounds(engine) -> list[dict]:
-    """opportunity_score and every sub-score must fall within [0, 100]."""
+    """
+    opportunity_score, every sub-score, and regulatory_quality/political_stability
+    must fall within [0, 100]. The latter two are raw World Bank fields, not
+    derived scores, but they're included here (rather than a separate check)
+    because they're fetched on the WGI "score" scale (GOV_WGI_RQ.SC /
+    GOV_WGI_PV.SC), which is 0-100 same as the scores -- a stale row still
+    holding the old -2.5..2.5 "estimate" scale value is exactly the kind of
+    out-of-range value this check exists to catch.
+    """
     score_cols = [
         "opportunity_score", "score_market_size", "score_market_growth",
         "score_market_quality", "score_price_competitiveness", "score_afg_foothold",
         "score_distance", "score_language", "score_fta", "score_tariff",
+        "regulatory_quality", "political_stability",
     ]
     conditions = " OR ".join(f"({c} < 0 OR {c} > 100)" for c in score_cols)
     sql = text(f"""

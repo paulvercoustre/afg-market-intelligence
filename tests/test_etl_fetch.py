@@ -354,9 +354,11 @@ class TestComtradeToWitsCodeMapping:
 class TestWorldBankIndicators:
     def test_wgi_codes_are_current(self):
         # The pre-2024 codes RQ.EST / PV.EST were archived by the World Bank
-        # and silently return no data.
-        assert fetch._WB_INDICATORS["regulatory_quality"] == "GOV_WGI_RQ.EST"
-        assert fetch._WB_INDICATORS["political_stability"] == "GOV_WGI_PV.EST"
+        # and silently return no data. Both fields deliberately use the .SC
+        # (0-100 "score") variant, not .EST (-2.5..2.5 "estimate") -- see the
+        # comment above _WB_INDICATORS in etl/fetch.py.
+        assert fetch._WB_INDICATORS["regulatory_quality"] == "GOV_WGI_RQ.SC"
+        assert fetch._WB_INDICATORS["political_stability"] == "GOV_WGI_PV.SC"
 
     def test_api_error_payload_raises(self):
         class FakeResponse:

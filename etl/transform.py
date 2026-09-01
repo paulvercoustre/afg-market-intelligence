@@ -640,17 +640,27 @@ def _score_growth(cagr_pct: float | None) -> float:
 
 
 def _score_market_quality(ctx: dict) -> float:
-    """Average of LPI, regulatory quality and political stability sub-scores."""
+    """
+    Average of LPI, regulatory quality and political stability sub-scores.
+
+    regulatory_quality and political_stability are both fetched on the WGI
+    "score" scale (GOV_WGI_RQ.SC / GOV_WGI_PV.SC), already 0-100 -- see the
+    note by _WB_INDICATORS in etl/fetch.py. Only lpi_score (1-5) still needs
+    rescaling here.
+    """
     sub: list[float] = []
 
     lpi = ctx.get("lpi_score")
     if lpi is not None:
         sub.append(max(0.0, min(100.0, (lpi - 1) / 4 * 100)))  # 1–5 → 0–100
 
-    for wgi_key in ("regulatory_quality", "political_stability"):
-        val = ctx.get(wgi_key)
-        if val is not None:
-            sub.append(max(0.0, min(100.0, (val + 2.5) / 5.0 * 100)))  # -2.5–2.5 → 0–100
+    reg = ctx.get("regulatory_quality")
+    if reg is not None:
+        sub.append(max(0.0, min(100.0, reg)))  # already 0–100
+
+    pv = ctx.get("political_stability")
+    if pv is not None:
+        sub.append(max(0.0, min(100.0, pv)))  # already 0–100
 
     return float(sum(sub) / len(sub)) if sub else 50.0  # neutral if no data
 
