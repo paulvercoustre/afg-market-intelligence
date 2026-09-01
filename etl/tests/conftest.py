@@ -125,7 +125,7 @@ def sample_indicator_row() -> dict:
         "global_market_size_usd": 10_000_000.0,
         "afg_export_value_usd": 200_000.0,
         "cagr_pct": 10.0,
-        "price_competitiveness": "Competitive",
+        "price_competitiveness": "Below Market",
         "afg_supplier_rank": 3,
     }
 

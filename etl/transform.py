@@ -481,12 +481,12 @@ def _price_competitiveness(
     label = None
     if pct_diff is not None:
         thresholds = PRICE_COMPETITIVENESS
-        if pct_diff < thresholds["highly_competitive"]:
-            label = "Highly Competitive"
-        elif pct_diff < thresholds["competitive"]:
-            label = "Competitive"
-        elif pct_diff < thresholds["average"]:
-            label = "Average"
+        if pct_diff < thresholds["substantially_below_market"]:
+            label = "Substantially Below Market"
+        elif pct_diff < thresholds["below_market"]:
+            label = "Below Market"
+        elif pct_diff < thresholds["near_market"]:
+            label = "Near Market"
         else:
             label = "Above Market"
 
@@ -667,9 +667,9 @@ def _score_market_quality(ctx: dict) -> float:
 
 def _score_price(competitiveness: str | None) -> float:
     mapping = {
-        "Highly Competitive": 100.0,
-        "Competitive": 75.0,
-        "Average": 50.0,
+        "Substantially Below Market": 100.0,
+        "Below Market": 75.0,
+        "Near Market": 50.0,
         "Above Market": 25.0,
     }
     return mapping.get(competitiveness or "", 50.0)

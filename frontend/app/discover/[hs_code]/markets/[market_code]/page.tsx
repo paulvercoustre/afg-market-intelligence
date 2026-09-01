@@ -178,7 +178,7 @@ export default async function MarketProfilePage(
                     value={formatPct(profile.trade.price.price_vs_market_pct)}
                   />
                   <StatCard
-                    label="Competitiveness"
+                    label="Afghanistan Price"
                     value={profile.trade.price.price_competitiveness ?? '—'}
                     sub={
                       profile.trade.price.price_competitiveness == null

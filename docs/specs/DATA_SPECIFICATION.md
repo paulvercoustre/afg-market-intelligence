@@ -249,9 +249,9 @@ Market average price = mean unit price across the suppliers who *do* have data o
 
 | Label | Condition (% vs. market average) |
 |---|---|
-| Highly Competitive | < −10% |
-| Competitive | −10% to 0% |
-| Average | 0% to +10% |
+| Substantially Below Market | < −10% |
+| Below Market | −10% to 0% |
+| Near Market | 0% to +10% |
 | Above Market | > +10% |
 
 Thresholds defined in `config.py` → `PRICE_COMPETITIVENESS`.

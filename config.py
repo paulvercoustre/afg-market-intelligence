@@ -13,9 +13,9 @@ TOP_N_MARKETS = 10
 
 # Price competitiveness thresholds (% difference vs market average)
 PRICE_COMPETITIVENESS = {
-    'highly_competitive': -10,   # more than 10% below market avg
-    'competitive': 0,            # up to 10% below market avg
-    'average': 10,               # within 10% above market avg
+    'substantially_below_market': -10,   # more than 10% below market avg
+    'below_market': 0,                   # up to 10% below market avg
+    'near_market': 10,                   # within 10% above market avg
     # above 10% → 'Above Market'
 }
 

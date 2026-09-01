@@ -141,9 +141,9 @@ class TestComputeIndicators:
     def test_price_competitiveness_label(self, mirror_df, global_df):
         rows = compute_indicators(PRODUCT_ID, ["842"], mirror_df, global_df, YEARS)
         row = rows[0]
-        # Afg $10 vs market avg ~$15.67 → ~36% below → Highly Competitive
-        assert row["price_competitiveness"] == "Highly Competitive"
-        assert row["price_vs_market_pct"] < PRICE_COMPETITIVENESS["highly_competitive"]
+        # Afg $10 vs market avg ~$15.67 → ~36% below → Substantially Below Market
+        assert row["price_competitiveness"] == "Substantially Below Market"
+        assert row["price_vs_market_pct"] < PRICE_COMPETITIVENESS["substantially_below_market"]
 
     def test_empty_mirror_returns_empty(self, global_df):
         assert compute_indicators(PRODUCT_ID, MARKET_CODES, pd.DataFrame(), global_df, YEARS) == []
