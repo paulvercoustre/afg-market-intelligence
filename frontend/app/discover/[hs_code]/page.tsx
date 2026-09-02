@@ -105,6 +105,11 @@ export default async function DiscoverPage(props: PageProps<'/discover/[hs_code]
                       label={dim.label}
                       score={market.score_breakdown[dim.key]}
                       weight={dim.weight}
+                      displayValue={
+                        dim.key === 'tariff' && market.tariff_rate_pct != null
+                          ? `${market.tariff_rate_pct.toFixed(1)}%`
+                          : undefined
+                      }
                     />
                   ))}
                 </div>

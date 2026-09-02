@@ -104,6 +104,11 @@ export default async function MarketProfilePage(
                   key={dim.key}
                   label={`${dim.label} (${(dim.weight * 100).toFixed(0)}%)`}
                   score={profile.score_breakdown[dim.key]}
+                  displayValue={
+                    dim.key === 'tariff' && profile.context.tariff_rate_pct != null
+                      ? `${profile.context.tariff_rate_pct.toFixed(1)}%`
+                      : undefined
+                  }
                 />
               ))}
             </div>

@@ -9,7 +9,7 @@ from config import (
     MARKET_SIZE_LOG_FLOOR_USD,
     MAX_GREAT_CIRCLE_DISTANCE_KM,
     OPPORTUNITY_SCORE_WEIGHTS,
-    TARIFF_SCORE_PER_PCT,
+    TARIFF_SCORE_LOG_CEILING_PCT,
 )
 from etl.transform import (
     _latest_wb_context,
@@ -98,8 +98,12 @@ class TestDimensionScores:
         ctx = {"political_stability": 25.0}
         assert _score_market_quality(ctx) == pytest.approx(25.0)
 
-    def test_market_quality_neutral_when_empty(self):
-        assert _score_market_quality({}) == 50.0
+    def test_market_quality_missing_returns_none(self):
+        # No LPI, regulatory_quality or political_stability data at all --
+        # caller excludes this from the composite and renormalises
+        # remaining weights, rather than guessing a neutral default (same
+        # as market_size/market_growth).
+        assert _score_market_quality({}) is None
 
     def test_price_competitiveness_mapping(self):
         assert _score_price("Substantially Below Market") == 100.0
@@ -108,40 +112,62 @@ class TestDimensionScores:
         assert _score_price("Above Market") == 25.0
         assert _score_price(None) == 50.0
 
-    def test_foothold_log_scale(self):
-        assert _score_foothold(None) == 0.0
-        assert _score_foothold(0) == 0.0
-        assert _score_foothold(1_000_000) == pytest.approx(84.0, rel=0.01)
+    def test_foothold_leader_scores_100(self):
+        # afg_value == max_afg_value -- Afghanistan's single best market for
+        # this product always scores exactly 100 (same per-product-ceiling
+        # property as _score_market_size).
+        assert _score_foothold(1_000_000, 1_000_000) == pytest.approx(100.0)
+
+    def test_foothold_log_scale_not_linear(self):
+        # 100k is 10% of the 1M ceiling -- log-scaled, so it scores far
+        # above the 10 a linear ratio would give.
+        assert _score_foothold(100_000, 1_000_000) == pytest.approx(83.33, abs=0.01)
+
+    def test_foothold_no_ceiling_is_zero(self):
+        # max_afg_value missing entirely (no product-wide data at all) --
+        # can't compute a ratio, so this scores 0 even with a real value.
+        assert _score_foothold(1_000_000, None) == 0.0
+        assert _score_foothold(None, None) == 0.0
+        assert _score_foothold(0, None) == 0.0
+
+    def test_foothold_zero_value_is_zero(self):
+        assert _score_foothold(0, 1_000_000) == 0.0
 
     def test_foothold_current_year_value_wins_over_last_export(self):
         # Both present -- the active current-year figure is used, not a
         # blend with the historical one.
-        assert _score_foothold(1_000_000, 500_000) == pytest.approx(84.0, rel=0.01)
+        assert _score_foothold(1_000_000, 1_000_000, 500_000) == pytest.approx(100.0)
 
     def test_foothold_falls_back_to_last_export_when_current_year_is_none(self):
-        # Genuine current-year absence, but Afghanistan exported $1M as
-        # recently as a bounded prior year -- discounted (0.7x) vs. an
-        # active current-year presence, but still above the "no Afghan
-        # trade at all" baseline (0.0).
-        score = _score_foothold(None, 1_000_000)
-        assert score == pytest.approx(84.0 * 0.7, rel=0.01)
-        assert 0.0 < score < 84.0
+        # Genuine current-year absence, but Afghanistan exported $1M (this
+        # product's own ceiling value) as recently as a bounded prior year
+        # -- discounted (0.7x) vs. an active current-year presence, but
+        # still above the "no Afghan trade at all" baseline (0.0).
+        score = _score_foothold(None, 1_000_000, 1_000_000)
+        assert score == pytest.approx(70.0, abs=0.01)
+        assert 0.0 < score < 100.0
 
     def test_foothold_falls_back_to_last_export_when_current_year_is_zero(self):
-        assert _score_foothold(0, 1_000_000) == pytest.approx(84.0 * 0.7, rel=0.01)
+        assert _score_foothold(0, 1_000_000, 1_000_000) == pytest.approx(70.0, abs=0.01)
 
     def test_foothold_trivial_last_export_scores_barely_above_zero(self):
-        # A $1 historical value is technically "some" history -- it scores
-        # a hair above 0, not a meaningfully higher floor.
-        score = _score_foothold(None, 1)
+        # A $1 historical value against a $1M ceiling is technically "some"
+        # history -- it scores a hair above 0, not a meaningfully higher floor.
+        score = _score_foothold(None, 1_000_000, 1)
         assert 0.0 < score < 5.0
 
     def test_foothold_no_current_and_no_last_export_is_zero(self):
-        assert _score_foothold(None, None) == 0.0
-        assert _score_foothold(0, 0) == 0.0
+        assert _score_foothold(None, 1_000_000, None) == 0.0
+        assert _score_foothold(0, 1_000_000, 0) == 0.0
+
+    def test_distance_missing_returns_none(self):
+        # A handful of real markets (e.g. Andorra, Montenegro, Palestine)
+        # have no CEPII GeoDist entry at all -- caller excludes this from
+        # the composite and renormalises remaining weights, rather than
+        # guessing a default (same as market_size/growth/quality/tariff).
+        assert _score_distance(None) is None
 
     def test_distance_boundaries(self):
-        assert _score_distance(None) == 50.0
         assert _score_distance(0) == pytest.approx(100.0)
         assert _score_distance(MAX_GREAT_CIRCLE_DISTANCE_KM) == pytest.approx(0.0)
 
@@ -162,11 +188,36 @@ class TestDimensionScores:
         cost_of_900km_far = _score_distance(9_000) - _score_distance(9_900)
         assert cost_of_900km_near > cost_of_900km_far * 5
 
+    def test_tariff_missing_returns_none(self):
+        # No usable tariff data at all (as opposed to a genuine 0% rate) --
+        # caller excludes this from the composite and renormalises
+        # remaining weights, rather than guessing a default (same as
+        # market_size/market_growth/market_quality).
+        assert _score_tariff(None) is None
+
     def test_tariff_boundaries(self):
-        assert _score_tariff(None) == 50.0
         assert _score_tariff(0) == pytest.approx(100.0)
-        assert _score_tariff(33.33) == pytest.approx(0.0, abs=0.1)
-        assert _score_tariff(10) == pytest.approx(100.0 - 10 * TARIFF_SCORE_PER_PCT)
+        assert _score_tariff(TARIFF_SCORE_LOG_CEILING_PCT) == pytest.approx(0.0, abs=0.01)
+        assert _score_tariff(10) == pytest.approx(33.09, abs=0.01)
+
+    def test_tariff_beyond_ceiling_clamps_not_negative(self):
+        # Well beyond the ceiling -- must clamp to 0, not go negative.
+        assert _score_tariff(TARIFF_SCORE_LOG_CEILING_PCT * 2) == pytest.approx(0.0)
+
+    def test_tariff_log_scale_differentiates_low_end_more_than_linear(self):
+        # log1p is concave, so the log score sits BELOW what a linear scale
+        # would give at any point strictly between 0 and the ceiling (both
+        # agree exactly at the two endpoints) -- but the whole point of
+        # log-scaling is that it spreads out nearby SMALL rates much more
+        # than linear does, which is where nearly all real tariff data
+        # sits. Two rates a mere 2 points apart (1% and 3%) should differ
+        # by far more under log than the flat, constant-slope gap linear
+        # gives for the same 2-point move anywhere on its scale.
+        log_gap = _score_tariff(1) - _score_tariff(3)
+        linear_gap = (100.0 - 1 * (100.0 / TARIFF_SCORE_LOG_CEILING_PCT)) - (
+            100.0 - 3 * (100.0 / TARIFF_SCORE_LOG_CEILING_PCT)
+        )
+        assert log_gap > linear_gap * 2
 
 
 class TestLatestWbContext:
@@ -247,9 +298,9 @@ class TestEnrichIndicatorsWithScores:
         row = sample_indicator_row.copy()
         rows = enrich_indicators_with_scores(
             [row],
-            market_context={},
+            market_context={"699": {2024: {"lpi_score": 3.5}}},
             all_market_sizes={"699": 10_000_000},
-            tariffs={},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
         )
         enriched = rows[0]
         weights = OPPORTUNITY_SCORE_WEIGHTS
@@ -280,9 +331,9 @@ class TestEnrichIndicatorsWithScores:
         row["global_market_size_usd"] = None
         rows = enrich_indicators_with_scores(
             [row],
-            market_context={},
+            market_context={"699": {2024: {"lpi_score": 3.5}}},
             all_market_sizes={"699": 10_000_000},
-            tariffs={},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
         )
         enriched = rows[0]
         assert enriched["score_market_size"] is None
@@ -308,9 +359,9 @@ class TestEnrichIndicatorsWithScores:
         row["cagr_pct"] = None
         rows = enrich_indicators_with_scores(
             [row],
-            market_context={},
+            market_context={"699": {2024: {"lpi_score": 3.5}}},
             all_market_sizes={"699": 10_000_000},
-            tariffs={},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
         )
         enriched = rows[0]
         assert enriched["score_market_growth"] is None
@@ -336,9 +387,9 @@ class TestEnrichIndicatorsWithScores:
         row["cagr_pct"] = None
         rows = enrich_indicators_with_scores(
             [row],
-            market_context={},
+            market_context={"699": {2024: {"lpi_score": 3.5}}},
             all_market_sizes={"699": 10_000_000},
-            tariffs={},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
         )
         enriched = rows[0]
         assert enriched["score_market_size"] is None
@@ -357,6 +408,189 @@ class TestEnrichIndicatorsWithScores:
         expected = other_dimensions / remaining_weight
         assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
 
+    def test_missing_market_quality_excluded_and_weights_renormalised(self, sample_indicator_row):
+        # No LPI/regulatory_quality/political_stability data at all --
+        # score_market_quality is None, and the remaining 7 dimensions'
+        # weights renormalise to sum to 1.0, same treatment as
+        # market_size/market_growth.
+        row = sample_indicator_row.copy()
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
+        )
+        enriched = rows[0]
+        assert enriched["score_market_quality"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_market_size"] * weights["market_size"]
+            + enriched["score_market_growth"] * weights["market_growth"]
+            + enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_tariff"] * weights["tariff"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_distance"] * weights["distance"]
+            + enriched["score_language"] * weights["language"]
+        )
+        expected = other_dimensions / (1.0 - weights["market_quality"])
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_all_three_nullable_dimensions_missing_renormalise_together(self, sample_indicator_row):
+        # market_size, market_growth and market_quality all missing at
+        # once -- the remaining 5 dimensions' weights must renormalise
+        # together, not just handle up to two missing at a time.
+        row = sample_indicator_row.copy()
+        row["global_market_size_usd"] = None
+        row["cagr_pct"] = None
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={"699": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
+        )
+        enriched = rows[0]
+        assert enriched["score_market_size"] is None
+        assert enriched["score_market_growth"] is None
+        assert enriched["score_market_quality"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_tariff"] * weights["tariff"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_distance"] * weights["distance"]
+            + enriched["score_language"] * weights["language"]
+        )
+        remaining_weight = (
+            1.0 - weights["market_size"] - weights["market_growth"] - weights["market_quality"]
+        )
+        expected = other_dimensions / remaining_weight
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_missing_tariff_excluded_and_weights_renormalised(self, sample_indicator_row):
+        # No usable tariff data -- score_tariff is None, and the remaining
+        # 7 dimensions' weights renormalise to sum to 1.0, same treatment
+        # as market_size/market_growth/market_quality.
+        row = sample_indicator_row.copy()
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={"699": {2024: {"lpi_score": 3.5}}},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={},
+        )
+        enriched = rows[0]
+        assert enriched["score_tariff"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_market_size"] * weights["market_size"]
+            + enriched["score_market_growth"] * weights["market_growth"]
+            + enriched["score_market_quality"] * weights["market_quality"]
+            + enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_distance"] * weights["distance"]
+            + enriched["score_language"] * weights["language"]
+        )
+        expected = other_dimensions / (1.0 - weights["tariff"])
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_all_four_nullable_dimensions_missing_renormalise_together(self, sample_indicator_row):
+        # market_size, market_growth, market_quality and tariff all missing
+        # at once -- the remaining 4 dimensions' weights must renormalise
+        # together, not just handle up to three missing at a time.
+        row = sample_indicator_row.copy()
+        row["global_market_size_usd"] = None
+        row["cagr_pct"] = None
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={},
+            all_market_sizes={"699": 10_000_000},
+            tariffs={},
+        )
+        enriched = rows[0]
+        assert enriched["score_market_size"] is None
+        assert enriched["score_market_growth"] is None
+        assert enriched["score_market_quality"] is None
+        assert enriched["score_tariff"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_distance"] * weights["distance"]
+            + enriched["score_language"] * weights["language"]
+        )
+        remaining_weight = (
+            1.0 - weights["market_size"] - weights["market_growth"]
+            - weights["market_quality"] - weights["tariff"]
+        )
+        expected = other_dimensions / remaining_weight
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_missing_distance_excluded_and_weights_renormalised(self, sample_indicator_row):
+        # A market with no CEPII GeoDist entry at all (e.g. Andorra, market
+        # code "20") -- score_distance is None, and the remaining 7
+        # dimensions' weights renormalise to sum to 1.0, same treatment as
+        # market_size/market_growth/market_quality/tariff.
+        row = sample_indicator_row.copy()
+        row["market_code"] = "20"
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={"20": {2024: {"lpi_score": 3.5}}},
+            all_market_sizes={"20": 10_000_000},
+            tariffs={"20": {"rate": 5.0, "indicator": "MFN", "year": 2022}},
+        )
+        enriched = rows[0]
+        assert enriched["score_distance"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_market_size"] * weights["market_size"]
+            + enriched["score_market_growth"] * weights["market_growth"]
+            + enriched["score_market_quality"] * weights["market_quality"]
+            + enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_tariff"] * weights["tariff"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_language"] * weights["language"]
+        )
+        expected = other_dimensions / (1.0 - weights["distance"])
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
+    def test_all_five_nullable_dimensions_missing_renormalise_together(self, sample_indicator_row):
+        # market_size, market_growth, market_quality, tariff and distance
+        # all missing at once -- the remaining 3 dimensions' weights must
+        # renormalise together.
+        row = sample_indicator_row.copy()
+        row["market_code"] = "20"  # Andorra -- no CEPII GeoDist entry
+        row["global_market_size_usd"] = None
+        row["cagr_pct"] = None
+        rows = enrich_indicators_with_scores(
+            [row],
+            market_context={},
+            all_market_sizes={"20": 10_000_000},
+            tariffs={},
+        )
+        enriched = rows[0]
+        assert enriched["score_market_size"] is None
+        assert enriched["score_market_growth"] is None
+        assert enriched["score_market_quality"] is None
+        assert enriched["score_tariff"] is None
+        assert enriched["score_distance"] is None
+
+        weights = OPPORTUNITY_SCORE_WEIGHTS
+        other_dimensions = (
+            enriched["score_price_competitiveness"] * weights["price_competitiveness"]
+            + enriched["score_afg_foothold"] * weights["afg_foothold"]
+            + enriched["score_language"] * weights["language"]
+        )
+        remaining_weight = (
+            1.0 - weights["market_size"] - weights["market_growth"]
+            - weights["market_quality"] - weights["tariff"] - weights["distance"]
+        )
+        expected = other_dimensions / remaining_weight
+        assert enriched["opportunity_score"] == pytest.approx(round(expected, 2), abs=0.02)
+
     def test_foothold_score_uses_last_export_when_current_year_is_none(self, sample_indicator_row):
         # Market has no afg_export_value_usd for the current trade_data_year
         # (a genuine zero -- see _resolve_afg_last_export()'s docstring) but
@@ -370,18 +604,24 @@ class TestEnrichIndicatorsWithScores:
             [row], market_context={}, all_market_sizes={"699": 10_000_000},
         )
         enriched = rows[0]
-        assert enriched["score_afg_foothold"] == pytest.approx(84.0 * 0.7, rel=0.01)
-        assert 0.0 < enriched["score_afg_foothold"] < 84.0
+        # This is the only row in the batch, so afg_last_export_value_usd
+        # is also this product's own max_afg_value -- ratio 1.0, giving the
+        # full 100 * 0.7 discount rather than a partial log-scaled fraction.
+        assert enriched["score_afg_foothold"] == pytest.approx(70.0, abs=0.01)
+        assert 0.0 < enriched["score_afg_foothold"] < 100.0
 
-    def test_neutral_defaults_without_wb_and_tariff(self, sample_indicator_row):
+    def test_excluded_without_wb_and_tariff(self, sample_indicator_row):
         rows = enrich_indicators_with_scores(
             [sample_indicator_row.copy()],
             market_context={},
             all_market_sizes={"699": 10_000_000},
         )
         row = rows[0]
-        assert row["score_market_quality"] == pytest.approx(50.0)
-        assert row["score_tariff"] == pytest.approx(50.0)
+        # No World Bank context, no tariffs -- both score_market_quality and
+        # score_tariff are excluded (None), not a guessed neutral 50, same
+        # as market_size/growth.
+        assert row["score_market_quality"] is None
+        assert row["score_tariff"] is None
         assert row["gdp_per_capita_usd"] is None
         assert row["lpi_score_year"] is None
         assert row["regulatory_quality_year"] is None
@@ -447,7 +687,7 @@ class TestEnrichIndicatorsWithScores:
         assert enriched["tariff_indicator"] is None
         assert enriched["tariff_year"] is None
         assert enriched["has_fta"] is False
-        assert enriched["score_tariff"] == pytest.approx(50.0)  # neutral default
+        assert enriched["score_tariff"] is None  # excluded, not a guessed default
 
     def test_tariff_kept_when_only_historical_trade_evidence_exists(self, sample_indicator_row):
         # No trade this year, but a real historical shipment on record --

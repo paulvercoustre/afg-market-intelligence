@@ -25,7 +25,7 @@ from config import (
     OPPORTUNITY_SCORE_WEIGHTS,
     PRICE_COMPETITIVENESS,
     PRICE_OUTLIER_BAND_MULTIPLIER,
-    TARIFF_SCORE_PER_PCT,
+    TARIFF_SCORE_LOG_CEILING_PCT,
 )
 
 logger = logging.getLogger(__name__)
@@ -599,6 +599,22 @@ def enrich_indicators_with_scores(
     else:
         log_max = 1.0
 
+    # Pre-compute the per-product ceiling for _score_foothold's log min-max --
+    # Afghanistan's single best recorded trade relationship for this product,
+    # current-year or historical (whichever is larger), so the historical
+    # fallback path still has a meaningful reference even when no market
+    # currently has current-year data. See _score_foothold's docstring for
+    # why this needs no external floor the way market_size's does.
+    afg_values = []
+    for row in indicator_rows:
+        v = row.get("afg_export_value_usd")
+        if v and v > 0:
+            afg_values.append(v)
+        lv = row.get("afg_last_export_value_usd")
+        if lv and lv > 0:
+            afg_values.append(lv)
+    max_afg_value = max(afg_values) if afg_values else None
+
     for row in indicator_rows:
         mc = row["market_code"]
         year = row["computed_for_year"]
@@ -666,7 +682,7 @@ def enrich_indicators_with_scores(
         s_quality = _score_market_quality(ctx)
         s_price = _score_price(row.get("price_competitiveness"))
         s_foothold = _score_foothold(
-            row.get("afg_export_value_usd"), row.get("afg_last_export_value_usd")
+            row.get("afg_export_value_usd"), max_afg_value, row.get("afg_last_export_value_usd")
         )
         s_distance = _score_distance(dist_km)
         s_language = lang * 100
@@ -675,31 +691,34 @@ def enrich_indicators_with_scores(
 
         row["score_market_size"] = round(s_size, 2) if s_size is not None else None
         row["score_market_growth"] = round(s_growth, 2) if s_growth is not None else None
-        row["score_market_quality"] = round(s_quality, 2)
+        row["score_market_quality"] = round(s_quality, 2) if s_quality is not None else None
         row["score_price_competitiveness"] = round(s_price, 2)
         row["score_afg_foothold"] = round(s_foothold, 2)
-        row["score_distance"] = round(s_distance, 2)
+        row["score_distance"] = round(s_distance, 2) if s_distance is not None else None
         row["score_language"] = round(s_language, 2)
         row["score_fta"] = round(s_fta, 2)
-        row["score_tariff"] = round(s_tariff, 2)
+        row["score_tariff"] = round(s_tariff, 2) if s_tariff is not None else None
 
         # score_fta/has_fta are still computed and stored above for every row
         # (in case WITS's AFG-specific tariff coverage improves), but not
         # weighted into the composite -- see config.py's OPPORTUNITY_SCORE_WEIGHTS
         # comment for why (WITS has_fta is currently False for 100% of rows).
         #
-        # market_size and market_growth are the two dimensions with no
-        # sensible neutral-default value to fall back to when their
-        # underlying raw data (global_market_size_usd, cagr_pct) is missing
-        # entirely -- rather than guessing, a missing one is dropped from the
-        # composite and the remaining weights renormalised to sum back to
-        # 1.0. This is written to generalise over either or both being
-        # missing at once, not as two separate hardcoded cases.
-        nullable_dims = {"market_size": s_size, "market_growth": s_growth}
+        # market_size, market_growth, market_quality, tariff and distance are
+        # the five dimensions with no sensible neutral-default value to fall
+        # back to when their underlying raw data is missing entirely --
+        # rather than guessing, a missing one is dropped from the composite
+        # and the remaining weights renormalised to sum back to 1.0. This is
+        # written to generalise over any combination being missing at once,
+        # not as separate hardcoded cases.
+        nullable_dims = {
+            "market_size": s_size, "market_growth": s_growth,
+            "market_quality": s_quality, "tariff": s_tariff,
+            "distance": s_distance,
+        }
         fixed_dims = {
-            "market_quality": s_quality, "price_competitiveness": s_price,
-            "tariff": s_tariff, "afg_foothold": s_foothold,
-            "distance": s_distance, "language": s_language,
+            "price_competitiveness": s_price, "afg_foothold": s_foothold,
+            "language": s_language,
         }
         weighted_sum = sum(v * weights[k] for k, v in fixed_dims.items())
         present_weight = sum(weights[k] for k in fixed_dims)
@@ -797,7 +816,7 @@ def _score_growth(cagr_pct: float | None) -> float | None:
     return max(0.0, min(100.0, 50.0 + cagr_pct * (50.0 / CAGR_SCORE_BAND_PCT)))
 
 
-def _score_market_quality(ctx: dict) -> float:
+def _score_market_quality(ctx: dict) -> float | None:
     """
     Average of LPI, regulatory quality and political stability sub-scores.
 
@@ -805,6 +824,13 @@ def _score_market_quality(ctx: dict) -> float:
     "score" scale (GOV_WGI_RQ.SC / GOV_WGI_PV.SC), already 0-100 -- see the
     note by _WB_INDICATORS in etl/fetch.py. Only lpi_score (1-5) still needs
     rescaling here.
+
+    Returns None (not a guessed neutral default) if all three sub-fields are
+    missing -- same treatment as _score_market_size/_score_growth when their
+    underlying raw data is missing entirely: the caller excludes this
+    dimension from the composite and renormalises the remaining weights,
+    rather than assuming an "average" market quality with zero information
+    to base it on.
     """
     sub: list[float] = []
 
@@ -820,7 +846,7 @@ def _score_market_quality(ctx: dict) -> float:
     if pv is not None:
         sub.append(max(0.0, min(100.0, pv)))  # already 0–100
 
-    return float(sum(sub) / len(sub)) if sub else 50.0  # neutral if no data
+    return float(sum(sub) / len(sub)) if sub else None
 
 
 def _score_price(competitiveness: str | None) -> float:
@@ -833,9 +859,33 @@ def _score_price(competitiveness: str | None) -> float:
     return mapping.get(competitiveness or "", 50.0)
 
 
-def _score_foothold(afg_value: float | None, afg_last_export_value: float | None = None) -> float:
+def _score_foothold(
+    afg_value: float | None,
+    max_afg_value: float | None,
+    afg_last_export_value: float | None = None,
+) -> float:
     """
     Existing Afghan presence signals market acceptance.
+
+    Per-product log min-max, same method as _score_market_size:
+    100 * log1p(x) / log1p(max_afg_value), where max_afg_value (precomputed
+    by the caller) is Afghanistan's single best recorded trade relationship
+    for this product across all its markets -- current-year or historical,
+    whichever is larger -- so the market with Afghanistan's strongest
+    foothold in THIS product always scores exactly 100, and every other
+    market scales smoothly relative to it. No external floor is needed the
+    way market_size's F is: unlike global_market_size_usd, there's no
+    noise/artifact ambiguity to guard against here -- even a tiny genuine
+    shipment (e.g. $7) is real trade evidence, consistent with the
+    trade-evidence rule in enrich_indicators_with_scores's tariff logic
+    above, so log1p(0)=0 is already the right, natural floor.
+
+    Replaced 2026-09-02: the previous min(100, log10(x+1)*14) used an
+    arbitrary multiplier with an undocumented, product-independent ceiling
+    (clamped at ~$13.9M) -- 22 of 36 products never had ANY market reach
+    100 under it, purely because that product's biggest trade relationship
+    happened to sit below that fixed threshold, unrelated to whether it was
+    genuinely Afghanistan's strongest market for that product.
 
     afg_value is this year's figure -- the same one used everywhere else,
     including a genuine current-year zero when Afghanistan isn't in this
@@ -845,17 +895,18 @@ def _score_foothold(afg_value: float | None, afg_last_export_value: float | None
     Afghanistan has a recent bounded-year export on record
     (afg_last_export_value, see AFG_LAST_EXPORT_FLOOR_YEAR), that's still
     real evidence of market acceptance -- score it, just at a discount
-    (0.7x) versus an active current-year presence.
+    (0.7x, capped at 90) versus an active current-year presence. This
+    discount/cap structure is unchanged from before.
     """
-    if afg_value is not None and afg_value > 0:
-        # Log-scale: $10k → ~25, $1M → ~60, $10M → ~75, $100M → ~90
-        return min(100.0, math.log10(afg_value + 1) * 14)
-    if afg_last_export_value is not None and afg_last_export_value > 0:
-        return min(90.0, math.log10(afg_last_export_value + 1) * 14 * 0.7)
+    has_ceiling = max_afg_value is not None and max_afg_value > 0
+    if afg_value is not None and afg_value > 0 and has_ceiling:
+        return min(100.0, 100.0 * math.log1p(afg_value) / math.log1p(max_afg_value))
+    if afg_last_export_value is not None and afg_last_export_value > 0 and has_ceiling:
+        return min(90.0, 100.0 * math.log1p(afg_last_export_value) / math.log1p(max_afg_value) * 0.7)
     return 0.0  # no Afghan trade on record at all, current or historical
 
 
-def _score_distance(dist_km: int | None) -> float:
+def _score_distance(dist_km: int | None) -> float | None:
     """
     Closer is better, log-scaled: 0 km → 100, MAX_GREAT_CIRCLE_DISTANCE_KM → 0.
 
@@ -865,19 +916,54 @@ def _score_distance(dist_km: int | None) -> float:
     A neighbor at 400km vs. a market 3.5x farther at 1400km loses meaningfully
     more score than two far markets 1000km apart at 9000km vs. 10000km (only
     11% farther), even though both pairs differ by the same 1000km.
+
+    Returns None (not a guessed neutral default) when dist_km is missing --
+    same treatment as _score_market_size/_score_growth/_score_market_quality/
+    _score_tariff: the caller excludes this dimension from the composite and
+    renormalises the remaining weights. This isn't a hypothetical case --
+    a handful of real markets (e.g. Andorra, Montenegro, Palestine) have no
+    CEPII GeoDist entry for their ISO-3 code at all (see
+    DISTANCE_FROM_KABUL_KM in config.py), so there's genuinely no distance
+    on file to fall back to a guess for.
     """
     if dist_km is None:
-        return 50.0  # neutral default
+        return None
     if dist_km <= 0:
         return 100.0
     return max(0.0, 100.0 * (1 - math.log1p(dist_km) / math.log1p(MAX_GREAT_CIRCLE_DISTANCE_KM)))
 
 
-def _score_tariff(rate_pct: float | None) -> float:
+def _score_tariff(rate_pct: float | None) -> float | None:
     """
-    Lower tariff is better. 0% → 100, ~33% → 0 (linear).
-    Returns a neutral 50 when tariff data is unavailable.
+    Lower tariff is better. Log-transform then Min-Max against a fixed
+    external ceiling (OECD 2008 Handbook, Step 5, §5.1 log-transform for
+    positive skew + §5.3 Min-Max with the §5.4 external-reference variant
+    -- same method as _score_market_size/_score_growth/_score_foothold):
+
+        score = 100 * (1 - log1p(rate) / log1p(ceiling))
+
+    0% -> 100, ~3.3% (the real median) -> ~59, 10% -> ~33, 20% -> ~15,
+    ceiling%+ -> 0 (clamped). See TARIFF_SCORE_LOG_CEILING_PCT (config.py)
+    for why log-transform + Min-Max was chosen over a plain linear scale
+    (real tariffs are positively skewed -- most are small, log-transform
+    spreads out exactly that dense region instead of the rare high-tariff
+    tail), over a squared-ratio alternative (does the opposite: crowds the
+    dense region even tighter), and for how the ceiling itself (35, not the
+    30 first tried) was re-optimised for this specific transform.
+
+    Returns None (not a guessed neutral default) when tariff data is
+    unavailable -- same treatment as _score_market_size/_score_growth/
+    _score_market_quality: the caller excludes this dimension from the
+    composite and renormalises the remaining weights, rather than assuming
+    a neutral tariff with no real basis for that assumption. rate_pct ends
+    up None for two different reasons that both collapse to this same
+    treatment: WITS genuinely has no tariff schedule on file for this
+    reporter/product, or WITS has a rate but it's discarded because
+    Afghanistan has no real trade evidence for this market (the
+    non-traded-goods filter above) -- either way, there's no trustworthy
+    tariff number to score.
     """
     if rate_pct is None:
-        return 50.0
-    return max(0.0, 100.0 - float(rate_pct) * TARIFF_SCORE_PER_PCT)
+        return None
+    rate = max(0.0, float(rate_pct))
+    return max(0.0, min(100.0, 100.0 * (1 - math.log1p(rate) / math.log1p(TARIFF_SCORE_LOG_CEILING_PCT))))
