@@ -41,9 +41,43 @@ OPPORTUNITY_SCORE_WEIGHTS = {
 # still computed and stored (etl/transform.py, indicators table) in case
 # WITS coverage improves -- just not weighted into opportunity_score.
 
-# Tariff scoring: maps tariff rate % to a 0–100 score.
-# 0% → 100, 10% → 70, 20% → 40, 33%+ → 0  (linear: score = max(0, 100 - rate * 3))
-TARIFF_SCORE_PER_PCT = 3.0
+# Tariff scoring: log-transform then Min-Max against a fixed external
+# ceiling (OECD 2008 Handbook, Step 5, §5.1 log-transform for positive skew
+# + §5.3 Min-Max with the §5.4 external-reference variant -- same method as
+# MARKET_SIZE_LOG_FLOOR_USD and CAGR_SCORE_BAND_PCT above).
+# score = 100 * (1 - log1p(rate) / log1p(ceiling)), clamped [0,100].
+# 0% -> 100, ~3.3% (median) -> ~59, 10% -> ~33, 20% -> ~15, 35%+ -> 0.
+#
+# Replaced 2026-09-02: the previous formula (linear, score = max(0, 100 -
+# rate*3)) wasn't itself miscalibrated -- checked against live data (n=916),
+# its implicit ~33.3% ceiling landed close to the real p95 (30%). But a
+# plain linear scale still crowds almost all real tariffs (median 3.28%,
+# p90 20%) into a narrow top slice, since most real variation sits in a
+# skewed cluster near zero. Log-transforming first spreads out exactly that
+# dense low-tariff region -- where nearly all real variation lives --
+# instead of the rare high-tariff tail; a squared-ratio alternative (used
+# for tariffs specifically by a comparable tool, trade.gov's Market
+# Diversification Tool) was also checked and does the opposite, compressing
+# the dense region even further (76% of rows landed in one bin), so it was
+# rejected.
+#
+# Ceiling re-optimised for the log-transform specifically (not just carried
+# over from the linear comparison): 32.3% of all tariff rows are an exact
+# 0% rate (many raw goods genuinely face zero MFN tariff), which always
+# scores exactly 100 regardless of ceiling -- so differentiation power was
+# swept against only the 620 rows with a real positive rate. Standard
+# deviation of the resulting scores peaks broadly around ceiling=18-20
+# (~22.3), but that peak clips 15.6% of those rows to a flat 0 (rate >=
+# ceiling). 35 trades a small amount of that peak differentiation (~21.2,
+# ~5% less) for a much lower clip rate (5.0%) and puts the median
+# real-tariff market exactly at neutral 50 -- the better trade-off given
+# how flat and broad the differentiation peak actually is.
+#
+# TARIFF_SCORE_LOG_CEILING_PCT is fixed, not data-derived or recomputed per
+# ETL run, for the identical stability reason as the other two constants
+# above: a bound that moves with the data would make opportunity_score
+# incomparable across runs.
+TARIFF_SCORE_LOG_CEILING_PCT = 35.0
 
 # Outlier band for cross-supplier unit-price comparison in
 # _price_competitiveness() (etl/transform.py): a supplier's implied unit

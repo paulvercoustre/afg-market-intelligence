@@ -12,7 +12,7 @@ A user selects a product (by HS code or name), and the tool returns a ranked lis
 | Market growth (CAGR of Afghan exports to this market) | 18% | UN Comtrade |
 | Market quality (governance, logistics) | 13% | World Bank WDI/WGI |
 | Price competitiveness | 13% | UN Comtrade |
-| Tariff rate on Afghan goods | 10% | WITS (World Bank) |
+| Tariff rate on Afghan goods | 12% | WITS (World Bank) |
 | Existing Afghan foothold | 10% | UN Comtrade (mirror stats) |
 | Geographic proximity to Kabul | 10% | Static lookup |
 | Language / cultural similarity | 4% | Static lookup |
@@ -74,7 +74,7 @@ docker-compose exec backend python -m etl.run --products Saffron "Dried Grapes (
 # Skip World Bank fetch (use cached data)
 docker-compose exec backend python -m etl.run --skip-world-bank
 
-# Skip WITS tariff fetch (faster runs, neutral tariff scores)
+# Skip WITS tariff fetch (faster runs; reuses each product's previously-stored tariffs)
 docker-compose exec backend python -m etl.run --skip-tariffs
 
 # Dry run — fetch and transform but don't write to DB
@@ -238,7 +238,7 @@ WITS tariff data typically lags 2–3 years behind trade data, so the ETL walks 
 
 **A fetched rate is only kept if Afghanistan actually trades there.** WITS reports MFN/Applied tariff schedules for a product even when a market doesn't trade it at all — its own site says so directly ("MFN and Applied Tariff are provided for both traded and non-traded goods") — and the tariff API gives no "is this traded" flag to filter that out. So the ETL derives it from Comtrade instead: a rate is discarded (stored as `NULL`) unless `afg_export_value_usd` shows real Afghan exports to that market, this year or (falling back, same logic as the foothold score) historically. This applies the same way whether WITS reported the rate as `AHS` or `MFN` — that only says which regime the number came from, not whether Afghanistan actually trades there.
 
-A discarded rate falls back to `score_tariff = 50` (neutral), the same as any other unavailable dimension — deliberately not 0. A market with no Afghan trade history already scores low on `score_afg_foothold`; also zeroing `score_tariff` for the same underlying fact would double-penalize it across two dimensions (22% of the composite combined) and bias the tool against exactly the untapped markets it's meant to surface.
+A discarded rate makes `score_tariff = NULL`, excluded from `opportunity_score` with the remaining weights renormalised — changed 2026-09-02 from a neutral-50 default. Deliberately not a guessed 0 either: `score_afg_foothold` already carries the "no Afghan trade history" penalty as a confirmed fact for its own dimension; not knowing the tariff is a genuinely different situation (we don't know what applies, not that it's bad), so excluding it avoids asserting either a false-favorable or false-punitive number and avoids double-counting the same underlying fact across two dimensions.
 
 ### Static lookups
 - **Distance from Kabul** — approximate straight-line km for ~60 trading partners

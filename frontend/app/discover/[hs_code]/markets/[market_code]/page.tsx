@@ -5,6 +5,7 @@ import { formatUSD, formatPct, scoreBg, scoreBarColor } from '@/lib/utils'
 import ScoreBadge from '@/components/ScoreBadge'
 import ScoreBar from '@/components/ScoreBar'
 import NextSteps from '@/components/NextSteps'
+import InfoTooltip from '@/components/InfoTooltip'
 
 // Display label per config.NATIVE_UNIT_PRICE_BASES value (falls back to the
 // raw basis string for anything not listed, e.g. a future addition there).
@@ -103,6 +104,11 @@ export default async function MarketProfilePage(
                   key={dim.key}
                   label={`${dim.label} (${(dim.weight * 100).toFixed(0)}%)`}
                   score={profile.score_breakdown[dim.key]}
+                  displayValue={
+                    dim.key === 'tariff' && profile.context.tariff_rate_pct != null
+                      ? `${profile.context.tariff_rate_pct.toFixed(1)}%`
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -178,8 +184,9 @@ export default async function MarketProfilePage(
                     value={formatUnitPrice(profile.trade.price.market_avg_price_usd, profile.trade.price.price_basis)}
                   />
                   <StatCard
-                    label="vs market avg"
+                    label="Price gap"
                     value={formatPct(profile.trade.price.price_vs_market_pct)}
+                    info="How far Afghan price is from the market average — negative means cheaper, positive means pricier."
                   />
                   <StatCard
                     label="Afghanistan Price"
@@ -333,15 +340,20 @@ function StatCard({
   value,
   sub,
   highlight,
+  info,
 }: {
   label: string
   value: string
   sub?: string
   highlight?: boolean
+  info?: string
 }) {
   return (
     <div>
-      <p className="text-xs text-gray-400 mb-0.5">{label}</p>
+      <p className="text-xs text-gray-400 mb-0.5 flex items-center">
+        {label}
+        {info && <InfoTooltip text={info} />}
+      </p>
       <p className={`text-sm font-semibold ${highlight ? 'text-[#0468B1]' : 'text-gray-900'}`}>
         {value}
       </p>
